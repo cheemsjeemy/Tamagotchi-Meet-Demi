@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../../Desktop/CPP projects"
+		},
+		{
+			"name": "ESP32-S3",
+			"path": "../ESP32-S3"
+		},
+		{
+			"name": "new",
+			"path": "../new"
+		}
+	],
+	"settings": {}
+}

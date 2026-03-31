@@ -1,0 +1,47 @@
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+
+// SH1106 128x64 I2C Constructor
+// Rotation: U8G2_R0, Clock: 9, Data: 8, Reset: U8X8_PIN_NONE
+U8G2_SH1106_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ 9, /* data=*/ 8, /* reset=*/ U8X8_PIN_NONE);
+
+const int touchPins[] = {3, 4, 5, 6, 7};
+const int numTouchPins = 5;
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Wait for Serial for S3 native USB
+  while (!Serial && millis() < 5000) { delay(10); }
+
+  // Initialize OLED
+  u8g2.begin();
+  u8g2.setFont(u8g2_font_6x10_tf); // Choose a small, readable font
+  
+  Serial.println("OLED & Touch Monitor Started");
+}
+
+void loop() {
+  u8g2.clearBuffer(); // Clear internal memory
+  u8g2.drawStr(0, 10, "ESP32-S3 Touch Monitor");
+  u8g2.drawLine(0, 12, 127, 12);
+
+  for (int i = 0; i < numTouchPins; i++) {
+    int val = touchRead(touchPins[i]); // Read capacitive value
+    
+    // Create display string for each pin
+    char buffer[20];
+    sprintf(buffer, "GPIO %d: %d", touchPins[i], val);
+    
+    // Draw to screen (y-offset 15px per line)
+    u8g2.drawStr(0, 25 + (i * 12), buffer);
+    
+    // Also print to Serial for debugging
+    Serial.printf("P%d:%d | ", touchPins[i], val);
+  }
+  
+  Serial.println();
+  u8g2.sendBuffer(); // Transfer internal memory to the display
+  delay(200);
+}
