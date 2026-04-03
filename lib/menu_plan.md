@@ -27,18 +27,21 @@ Root Menu (C:/)
 │   │   └── ESP32 → Network
 │   │        ├── Status: Connected / Not Connected
 │   │        ├── SSID: (WIFI NAME OF THE NETWORK/ROUTER)
-│   │        └── IP: xxx.xxx.xxx.xxx (IP of ESP32 that was given by the Network/Router)
-│   │
+│   │        └── IP: xxx.xxx.xxx.xxx
 │   ├── Connect to Network
-│   │   ├── Scan Networks
-│   │   │   └── (WIFI NAME)
-│   │   │        ├── Connect via Phone (QR)
-│   │   │        └── Forget (if saved)
-│   │   │
-│   │   └── Saved Networks
-│   │        └── (WIFI NAME)
-│   │             ├── Connect
-│   │             └── Forget
+│   │   └── Scan Networks (folder)
+│   │       ├── SCAN (only if no networks found)
+│   │       ├── [Wifi Lists] + SCAN
+│   │       │    └── [Wifi 1 SSID]
+│   │       │         ├── Connect via Phone (QR)
+│   │       │         └── SAVED (if network is saved)
+│   │       │    └── [Wifi 2 SSID] ...
+│   │       └── ...
+│   │
+│   ├── Saved Networks
+│   │   └── (WIFI NAME)
+│   │        ├── Connect
+│   │        └── Forget
 │   │
 │   └── Device Access (Connect TO Demi)
 │       ├── Show QR (Auto Connect Page)
