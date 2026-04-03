@@ -17,18 +17,17 @@ Root Menu (C:/)
 │   │   └── Fridge
 │   │       └── Apple, etc. (future: food items)
 │   └── Sleep
-│   Wifi
+├── Wifi
+│   ├── Wifi [X] (WiFi Toggle)
 │   ├── Connections
 │   │   ├── Device → ESP32
 │   │   │    ├── Status: Connected / None
-│   │   │    └── Device Name / IP
+│   │   │    └── Name of the Device/s Connected
 │   │   │
 │   │   └── ESP32 → Network
 │   │        ├── Status: Connected / Not Connected
-│   │        ├── SSID: (WIFI NAME)
-│   │        └── IP: xxx.xxx.xxx.xxx
-│   │
-│   ├── Toggle WiFi
+│   │        ├── SSID: (WIFI NAME OF THE NETWORK/ROUTER)
+│   │        └── IP: xxx.xxx.xxx.xxx (IP of ESP32 that was given by the Network/Router)
 │   │
 │   ├── Connect to Network
 │   │   ├── Scan Networks
@@ -44,8 +43,6 @@ Root Menu (C:/)
 │   └── Device Access (Connect TO Demi)
 │       ├── Show QR (Auto Connect Page)
 │       └── Show SSID + Password
-│
-│
 ├── Bluetooth
 └── MSAuthenticator
 ```
