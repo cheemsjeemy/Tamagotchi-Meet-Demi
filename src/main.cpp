@@ -1,10 +1,20 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
+#include <WiFi.h>
+#include <Preferences.h>
 
 #include "sprite_idle.h"
 #include "sprite_alert.h"
 #include "menu.h"
+#include <esp_task_wdt.h>
+
+// External WiFi network data from menu.cpp
+extern WifiScanResult savedNetworks[];
+extern int numSavedNetworks;
+
+// Forward declaration for main loop task
+void mainLoopTask(void* param);
 
 // Pins as requested
 #define OLED_SDA_PIN 8
@@ -34,16 +44,28 @@ void beep(uint16_t frequency, uint16_t durationMs) {
         ledcWrite(0, 0);
         return;
     }
+    
+    
     // Determine appropriate duty resolution based on frequency
-    // Higher frequencies need lower resolution to be achievable
-    uint8_t dutyResolution = 8;
-    if (frequency < 200) dutyResolution = 10;
-    if (frequency < 100) dutyResolution = 12;
+    // Lower frequencies need higher resolution to work properly
+    uint8_t dutyResolution;
+    if (frequency < 100) {
+        dutyResolution = 12;  // Very low freq (C2 = 65Hz)
+    } else if (frequency < 200) {
+        dutyResolution = 10;  // Low freq (C2-C3)
+    } else if (frequency < 400) {
+        dutyResolution = 8;   // Mid freq (C4-C5)
+    } else {
+        dutyResolution = 8;   // High freq (C5+)
+    }
     
     // Setup LEDC channel 0 with calculated resolution
     ledcSetup(0, frequency, dutyResolution);
     ledcAttachPin(BUZZER_PIN, 0);
-    ledcWrite(0, (1 << dutyResolution) / 2);  // 50% duty cycle
+    
+    // Write 50% duty cycle (half of max value for the resolution)
+    uint16_t halfDuty = (1 << dutyResolution) / 2;
+    ledcWrite(0, halfDuty);
     delay(durationMs);
     ledcWrite(0, 0);  // Stop
 }
@@ -249,8 +271,8 @@ void checkTouch() {
     // DEBUG: Log touch states before update
     static int debugCounter = 0;
     if (debugCounter++ % 10 == 0) {
-        Serial0.print("[checkTouch] prev: D="); Serial0.print(prevTouchState_DOWN);
-        Serial0.print(" C="); Serial0.println(prevTouchState_CENTER);
+        Serial.print("[checkTouch] prev: D="); Serial.print(prevTouchState_DOWN);
+        Serial.print(" C="); Serial.println(prevTouchState_CENTER);
     }
     */
    
@@ -322,7 +344,7 @@ void handleMenuInput() {
         if (centerPressedOnEnter) {
             // Center was part of the enter combo - clear the flag and ignore this release
             centerPressedOnEnter = false;
-            Serial0.println("CENTER released (was part of enter combo - ignored)");
+            Serial.println("CENTER released (was part of enter combo - ignored)");
         } else if (!keysBlocked) {
             menuEnter();
         } else {
@@ -348,20 +370,21 @@ void handleMenuInput() {
         }
     }
     
-    // Render menu
+    // Render menu (always render even when QR code is displayed to keep display active)
     renderMenu(u8g2);
 }
 
 // Initialize touch pins
 void initTouch() {
-    Serial0.println("Touch pins initialized: GPIO 3=Center, 4=Up, 5=Down, 6=Left, 7=Right");
+    Serial.println("Touch pins initialized: GPIO 3=Center, 4=Up, 5=Down, 6=Left, 7=Right");
 }
 
 void setup() {
-    Serial0.begin(115200);
+    Serial.begin(115200);
+    esp_task_wdt_init(10, false);
     delay(1000);
-    Serial0.println("--- Booting ESP32-S3 N16R8 ---");
-    Serial0.println("Initializing system...");
+    Serial.println("--- Booting ESP32-S3 N16R8 ---");
+    Serial.println("Initializing system...");
 
     // Initialize touch pins
     initTouch();
@@ -371,17 +394,17 @@ void setup() {
     Wire.setPins(OLED_SDA_PIN, OLED_SCL_PIN);
     
     if (!Wire.begin()) {
-        Serial0.println("I2C Hardware Init Failed!");
+        Serial.println("I2C Hardware Init Failed!");
         neopixelWrite(RGB_LED_PIN, 50, 0, 0); // Red for error
         while(1);
     }
 
     // 2. Initialize U8g2
     if (u8g2.begin()) {
-        Serial0.println("U8g2 initialized successfully on 8/9");
+        Serial.println("U8g2 initialized successfully on 8/9");
         neopixelWrite(RGB_LED_PIN, 0, 50, 0); // Green for success
     } else {
-        Serial0.println("SH1106 not found. Check address/wiring.");
+        Serial.println("SH1106 not found. Check address/wiring.");
         neopixelWrite(RGB_LED_PIN, 50, 25, 0); // Orange for "Display not found"
     }
 
@@ -395,52 +418,95 @@ void setup() {
     // Draw initial sprite
     drawSpriteWithIndicators(getCurrentSprite());
     
-    Serial0.println("Display initialized with sprite animation + touch indicators");
-    Serial0.println("Touch: Center=GPIO3, Up=GPIO4, Down=GPIO5, Left=GPIO6, Right=GPIO7");
-    Serial0.println("Menu: Down + Center to enter, Center + Up (hold) to exit, Double-tap Left to go back");
+    Serial.println("Display initialized with sprite animation + touch indicators");
+    Serial.println("Touch: Center=GPIO3, Up=GPIO4, Down=GPIO5, Left=GPIO6, Right=GPIO7");
+    Serial.println("Menu: Down + Center to enter, Center + Up (hold) to exit, Double-tap Left to go back");
+    
+    // Create main loop task pinned to Core 1
+    xTaskCreatePinnedToCore(
+        mainLoopTask,
+        "MainLoop",
+        8192,
+        nullptr,
+        1,
+        nullptr,
+        1  // Core 1
+    );
+    Serial.println("[Setup] Main loop task created on Core 1");
 }
 
 void loop() {
-    unsigned long currentTime = millis();
-    // Check touch input
-    checkTouch();
+    // Main loop is now running on Core 1 via xTaskCreatePinnedToCore
+    // This keeps the Arduino main task alive
+    delay(10);
+}
+
+// Main loop task pinned to Core 1
+void mainLoopTask(void* param) {
+    Serial.println("[MainLoop] Running on Core 1");
     
-    if (currentState == STATE_IDLE || currentState == STATE_ALERT) {
-        if (currentState == STATE_IDLE && shouldEnterMenu()) {
-            Serial0.println("shouldEnterMenu() = TRUE - entering menu!");
-            Serial0.print("  touchState_DOWN = "); Serial0.println(touchState_DOWN);
-            Serial0.print("  touchState_CENTER = "); Serial0.println(touchState_CENTER);
-            Serial0.print("  prevTouchState_DOWN = "); Serial0.println(prevTouchState_DOWN);
-            Serial0.print("  prevTouchState_CENTER = "); Serial0.println(prevTouchState_CENTER);
-            beepE5(80);  // Sound feedback
-            setState(STATE_MENU);
-            keysBlocked = true;
-            
-            // Record which keys were pressed when entering menu
-            // We need to track this so we can ignore their release
-            downPressedOnEnter = touchState_DOWN;
-            centerPressedOnEnter = touchState_CENTER;
-            
-            Serial0.print("  recorded: downPressedOnEnter="); Serial0.println(downPressedOnEnter);
-            Serial0.print("  recorded: centerPressedOnEnter="); Serial0.println(centerPressedOnEnter);
-        } else {
-            // Update animation frame
-            if (currentTime - lastFrameTime >= (unsigned long)getFrameDelay()) {
-                lastFrameTime = currentTime;
-                currentFrame++;
-                if (currentFrame >= getFrameCount()) {
-                    currentFrame = 0;
-                }
-            }
-            
-            // Draw sprite with touch indicators
-            drawSpriteWithIndicators(getCurrentSprite());
+    // Initialize TOTP
+    initTotp();
+    
+    // Auto-connect to preferred network
+    for (int i = 0; i < numSavedNetworks; i++) {
+        if (savedNetworks[i].autoConnect) {
+            Serial.print("[WiFi] Auto-connecting to: ");
+            Serial.println(savedNetworks[i].ssid);
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(savedNetworks[i].ssid, savedNetworks[i].password);
+            break;
         }
-    } else if (currentState == STATE_MENU) {
-        // Handle menu input
-        handleMenuInput();
     }
     
-    // Small delay to prevent busy-waiting
-    delay(5);
+    while (true) {
+        unsigned long currentTime = millis();
+        
+        // Check touch input
+        checkTouch();
+        
+        if (currentState == STATE_IDLE || currentState == STATE_ALERT) {
+            if (currentState == STATE_IDLE && shouldEnterMenu()) {
+                Serial.println("shouldEnterMenu() = TRUE - entering menu!");
+                Serial.print("  touchState_DOWN = "); Serial.println(touchState_DOWN);
+                Serial.print("  touchState_CENTER = "); Serial.println(touchState_CENTER);
+                Serial.print("  prevTouchState_DOWN = "); Serial.println(prevTouchState_DOWN);
+                Serial.print("  prevTouchState_CENTER = "); Serial.println(prevTouchState_CENTER);
+                beepE5(80);  // Sound feedback
+                setState(STATE_MENU);
+                keysBlocked = true;
+                
+                // Record which keys were pressed when entering menu
+                downPressedOnEnter = touchState_DOWN;
+                centerPressedOnEnter = touchState_CENTER;
+                
+                Serial.print("  recorded: downPressedOnEnter="); Serial.println(downPressedOnEnter);
+                Serial.print("  recorded: centerPressedOnEnter="); Serial.println(centerPressedOnEnter);
+            } else {
+                // Update animation frame
+                if (currentTime - lastFrameTime >= (unsigned long)getFrameDelay()) {
+                    lastFrameTime = currentTime;
+                    currentFrame++;
+                    if (currentFrame >= getFrameCount()) {
+                        currentFrame = 0;
+                    }
+                }
+                
+                // Draw sprite with touch indicators
+                drawSpriteWithIndicators(getCurrentSprite());
+            }
+        } else if (currentState == STATE_MENU) {
+            // Handle menu input
+            handleMenuInput();
+        }
+        
+        // Update TOTP in background
+        updateTotpInBackground();
+        
+        // Small delay to prevent busy-waiting
+        delay(5);
+        
+        // Yield to allow other tasks to run
+        yield();
+    }
 }

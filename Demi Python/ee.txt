@@ -1,0 +1,20 @@
+#include <Arduino.h>
+#include <Wire.h>
+#define RXD1 18
+#define TXD1 17
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1);
+
+  Serial.println("Bridge ready");
+}
+
+void loop() {
+  Serial1.println("HELLO"); // send clean signal
+  delay(1000);
+
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    Serial.write(c);
+  }
+}

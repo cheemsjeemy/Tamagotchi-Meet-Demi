@@ -34,7 +34,7 @@ Root Menu (C:/)
 │   │       ├── [Wifi Lists] + SCAN
 │   │       │    └── [Wifi 1 SSID]
 │   │       │         ├── Connect via Phone (QR)
-│   │       │         └── SAVED (if network is saved)
+│   │       │         └── SAVED (label, if network is saved)
 │   │       │    └── [Wifi 2 SSID] ...
 │   │       └── ...
 │   │
