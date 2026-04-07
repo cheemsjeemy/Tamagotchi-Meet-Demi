@@ -1,12 +1,20 @@
 # Introduction to Demi
 
+<<<<<<< HEAD
 Demi is a cat. Demi is a he. Demi is a companion travel-gotchi that always got your back and here to make you smile even if your world is upside down.
+=======
+Demi is a cat. Demi is a he. Demi is a companion travel-gotchi that always has your back and is here to make you smile even if your world is upside down.
+>>>>>>> bb4f46b8f0c84dc69474bd733fe0804b04b36683
 ---
 
 ## Features (For now... C: )
 
 ### 1. **Menu System**
+<<<<<<< HEAD
 Demi includes a dynamic menu system that allows users to interact with the device through various options. The menu is organized into folders and actions, making it easy to navigate and control the syst  em. Key menu categories include:
+=======
+Demi includes a dynamic menu system that allows users to interact with the device through various options. The menu is organized into folders and actions, making it easy to navigate and control the system. Key menu categories include:
+>>>>>>> bb4f46b8f0c84dc69474bd733fe0804b04b36683
 - **Settings**: Adjust brightness, view device information, and save preferences.
 - **Demi**: Interactive actions like petting, jumping, washing, and feeding.
 - **WiFi**: Manage WiFi connections, scan for networks, and connect to saved networks.
