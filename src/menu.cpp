@@ -11,34 +11,19 @@
 #include <qrcode.h>
 #include <time.h>
 
+#include "WiFiHandler.h"
+
+
 // Forward declarations for TOTP functions
 void initTotp();
 
 // Base32 secret for MS Authenticator setup
-#define TOTP_BASE32_SECRET "ITSASECRET"
+#define TOTP_BASE32_SECRET "srv62zqnx7hwldq5"
 
 
-    // QR code drawing state
-extern bool qrCodeDrawn; 
+// QR code drawing state
 bool qrCodeDrawn = false;
-
-// WiFi scan results array (max 10 networks)
-// Struct WifiScanResult is defined in menu.h
-WifiScanResult scanResults[MAX_WIFI_SCAN_RESULTS];
-int numScanResults = 0;
-
-// Saved WiFi networks (max 5)
-#define MAX_SAVED_NETWORKS 5
-WifiScanResult savedNetworks[MAX_SAVED_NETWORKS];
-int numSavedNetworks = 0;
-
-// Currently selected network index (for connecting)
-int selectedNetworkIndex = -1;
-bool isInScannedNetwork = false;
-bool isInSavedNetwork = false;
-
-// Scanning state flag - controls whether to show "SCANNING" instead of path
-bool isWifiScanning = false;
+Preferences preferences;
 
 // Connected clients
 const int MAX_CLIENTS = 10;
@@ -49,273 +34,240 @@ char clientLabels[MAX_CLIENTS][32];
 static unsigned long scanFailTime = 0;
 static char scanStatus[20] = "Scanning...";
 
+
 // WiFi password input buffer (removed - using captive portal instead)
 char wifiPasswordInput[64] = {0};
 int wifiPasswordInputLen = 0;
 bool isEnteringPassword = false;
 
-    // Preferences for saving settings
-    Preferences preferences;
 
-    // Captive Portal Web Server (Async)
-    AsyncWebServer captiveServer(80);
+// Captive Portal Web Server (Async)
+AsyncWebServer captiveServer(80);
+
+// ============================================
+// TOTP RELATED VARIABLES
+// ============================================
+
+// NTP Configuration for Philippines (UTC+8)
+const char* ntpServer = "1.ph.pool.ntp.org";
+const long gmtOffset_sec = 28800;
+const int daylightOffset_sec = 0;
+
+// TOTP key (will be decoded from base32)
+uint8_t hmacKey[20];
+int keyLength = 0;
+
+// TOTP instance - will be initialized after key decoding
+TOTP* totp = nullptr;
+
+// Current TOTP code (6 digits)
+char currentTotpCode[7] = {0};
+
+// Last NTP sync time
+unsigned long lastNtpSync = 0;
+
+// Last TOTP code generation time
+unsigned long lastTotpUpdate = 0;
+
+// NTP sync interval (1 hour = 3600000 ms)
+const unsigned long NTP_SYNC_INTERVAL = 3600000;
+
+// TOTP update interval (30 seconds = 30000 ms)
+const unsigned long TOTP_UPDATE_INTERVAL = 30000;
+
+// TOTP display mode flag
+bool showTotpCode = false;
+bool showTotpSecret = false;
+
+// Global menu state
+MenuState menuState = {};
+static bool menuSystemInitialized = false;
+
+
+// Forward declarations for callbacks
+void cbBrightness();
+void cbAbout();
+void cbPetting();
+void cbJumping();
+void cbWash();
+void cbSleep();
+void cbWifiToggle();
+void cbBluetoothToggle();
+void cbMSAuth();
+void cbTotpSetup();
+void cbFeed();
+void cbWifiTest();
+void cbBluetoothTest();
+void cbSaveSettings();
+
+// WiFi callbacks
+void cbWifiStatus();
+void cbWifiScan();
+void cbWifiForget();
+void cbWifiConnect();
+void cbWifiDisconnect();
+void cbAutoConnectToggle();
+void cbShowQR();
+void cbShowSSID();
+void cbShowPassword();
+
+// Forward declarations for helper functions
+void updateWifiStatusText();
+void updateConnectionsStatus();
+void updateScannedNetworksList();
+void updateSavedNetworksList();
+
+// ============================================
+// MENU TREE DEFINITION (Using helper functions)
+// ============================================
+// See menu.h for available helper functions:
+//   menuFolder("Name")           - Creates a folder
+//   menuAction("Name", callback)  - Creates an action
+//   menuToggle("Name", cb, key)   - Creates a toggle
+//   menuSlider("Name", val, cb, key) - Creates a slider
+//   menuInput("Name", len, key)   - Creates an input
+//   menuStatus("Name", callback)  - Creates a status display
+// ============================================
+
+// ============================================
+// ROOT MENU ITEMS
+// ============================================
+
+MenuItem menuSettings = menuFolder("Settings");
+MenuItem menuDemi     = menuFolder("Demi");
+MenuItem menuWifi     = menuFolder("Wifi");
+MenuItem menuBluetooth = menuFolder("Bluetooth");
+MenuItem menuMSAuth   = menuFolder("MSAuth");
+MenuItem menuPayloads = menuFolder("Payloads");
+
+// ============================================
+// SETTINGS SUBMENU
+// ============================================
+
+MenuItem menuBrightness    = menuSlider("Brightness", 128, cbBrightness, "brightness");
+MenuItem menuAbout         = menuAction("About", cbAbout);
+MenuItem menuSaveSettings  = menuAction("Save Settings", cbSaveSettings);
+
+// ============================================
+// BLUETOOTH SUBMENU
+// ============================================
+
+MenuItem menuBtEnabled   = menuToggle("Enabled", cbBluetoothToggle, "bt_enabled");
+MenuItem menuBtSettings  = menuFolder("BT Settings");
+MenuItem menuBtName       = menuInput("Device Name", 32, "bt_name");
+MenuItem menuBtTest       = menuAction("Test BT", cbBluetoothTest);
+
+// ============================================
+// DEMI SUBMENU
+// ============================================
+
+MenuItem menuPlay     = menuFolder("Play");
+MenuItem menuWash     = menuAction("Wash", cbWash);
+MenuItem menuSleep    = menuAction("Sleep", cbSleep);
+MenuItem menuFeed      = menuFolder("Feed");
+
+// Play submenu
+MenuItem menuPetting  = menuAction("Petting", cbPetting);
+MenuItem menuJumping  = menuAction("Jumping", cbJumping);
+
+// Feed -> Fridge submenu (food items)
+MenuItem menuFridge     = menuFolder("Fridge");
+MenuItem menuApple      = menuAction("Apple", cbFeed);
+MenuItem menuBanana     = menuAction("Banana", cbFeed);
+MenuItem menuOrange     = menuAction("Orange", cbFeed);
+MenuItem menuGrape      = menuAction("Grape", cbFeed);
+MenuItem menuStrawberry = menuAction("Strawberry", cbFeed);
+
+// ============================================
+// WIFI MENU ITEMS
+// ============================================
+
+static char wifiStatusText[20] = "Status: OFF";
+MenuItem menuWifiStatus    = menuStatus(wifiStatusText, cbWifiStatus);
+MenuItem menuWifiEnabled   = menuToggle("Toggle WiFi", cbWifiToggle, "wifi_enabled");
+MenuItem menuWifiDisconnect = menuAction("Disconnect", cbWifiDisconnect);
+MenuItem menuConnectToNetwork = menuFolder("Connect to Network");
+MenuItem menuScanNetworks  = menuFolder("Scan Networks");
+MenuItem menuScanAction    = menuAction("SCAN", cbWifiScan);
+MenuItem menuSavedNetworks = menuFolder("Saved Networks");
+MenuItem menuWifiScanning  = menuFolder("SCANNING...");
+MenuItem menuSavedStatus   = menuStatus("SAVED", nullptr);
+MenuItem menuNoItems       = menuStatus("NO ITEMS INSIDE", nullptr);
+
+// Dynamic network items for scanned networks
+MenuItem menuWifiNetworks[MAX_WIFI_SCAN_RESULTS];
+
+// Dynamic saved network items
+MenuItem menuSavedNetworksList[MAX_SAVED_NETWORKS];
+MenuItem menuSavedConnect[MAX_SAVED_NETWORKS] = {
+    menuAction("Connect", cbWifiConnect),
+    menuAction("Connect", cbWifiConnect),
+    menuAction("Connect", cbWifiConnect),
+    menuAction("Connect", cbWifiConnect),
+    menuAction("Connect", cbWifiConnect)
+};
+MenuItem menuSavedAutoConnect[MAX_SAVED_NETWORKS] = {
+    menuAction("Auto: OFF", cbAutoConnectToggle),
+    menuAction("Auto: OFF", cbAutoConnectToggle),
+    menuAction("Auto: OFF", cbAutoConnectToggle),
+    menuAction("Auto: OFF", cbAutoConnectToggle),
+    menuAction("Auto: OFF", cbAutoConnectToggle)
+};
+MenuItem menuSavedForget[MAX_SAVED_NETWORKS] = {
+    menuAction("Forget", cbWifiForget),
+    menuAction("Forget", cbWifiForget),
+    menuAction("Forget", cbWifiForget),
+    menuAction("Forget", cbWifiForget),
+    menuAction("Forget", cbWifiForget)
+};
+
+// Network submenu items - scanned networks use QR, saved networks use Connect
+MenuItem menuNetworkConnect = menuAction("Connect", cbWifiConnect);
+MenuItem menuNetworkForget = menuAction("Forget", cbWifiForget);
+MenuItem menuNetworkQR      = menuAction("Connect via Phone (QR)", cbShowQR);
+
+// Device Access folder
+MenuItem menuDeviceAccess   = menuFolder("Device Access");
+MenuItem menuDeviceQR       = menuAction("Show QR", cbShowQR);
+MenuItem menuDeviceSSID     = menuAction("SSID: Demi-ESP32", cbShowSSID);
+MenuItem menuDevicePassword = menuAction("Pass: demiesp32", cbShowPassword);
+
+// ============================================
+// MSAUTH SUBMENU (TOTP)
+// ============================================
+
+MenuItem menuTotpSetup      = menuAction("Setup Secret", cbTotpSetup);
+MenuItem menuTotpShowCode   = menuAction("Show Code", cbMSAuth);
+
+// ============================================
+// CONNECTIONS (NEW - from menu_plan.md)
+// ============================================
+
+static char deviceToEsp32Status[24] = "Status: None";
+static char deviceToEsp32Name[20] = "Name: Demi-ESP32";
+static char deviceToEsp32Ip[24] = "IP: 192.168.4.1";
+static char esp32ToNetworkStatus[24] = "Status: Not Connected";
+static char esp32ToNetworkSsid[20] = "SSID: (none)";
+static char esp32ToNetworkIp[24] = "IP: (none)";
+
+MenuItem menuConnections      = menuFolder("Connections");
+MenuItem menuDeviceToEsp32  = menuFolder("Device -> ESP32");
+MenuItem menuD2EStatus    = menuStatus(deviceToEsp32Status, nullptr);
+MenuItem menuD2EDeviceName = menuStatus(deviceToEsp32Name, nullptr);
+MenuItem menuD2EDeviceIp   = menuStatus(deviceToEsp32Ip, nullptr);
+
+MenuItem menuEsp32ToNetwork = menuFolder("ESP32 -> Network");
+MenuItem menuE2NStatus     = menuStatus(esp32ToNetworkStatus, nullptr);
+MenuItem menuE2NSsid        = menuStatus(esp32ToNetworkSsid, nullptr);
+MenuItem menuE2NIp          = menuStatus(esp32ToNetworkIp, nullptr);
+MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
 
     // ============================================
-    // TOTP RELATED VARIABLES
+    // NTP SYNC FUNCTIONS (Now handled by WiFiHandler)
     // ============================================
-
-    // NTP Configuration for Philippines (UTC+8)
-    const char* ntpServer = "1.ph.pool.ntp.org";
-    const long gmtOffset_sec = 28800;           // UTC +8 (8 * 3600 seconds)
-    const int daylightOffset_sec = 0;           // No daylight saving in PH
-    
-    // TOTP key (will be decoded from base32)
-    uint8_t hmacKey[20]; // Support up to 160-bit keys
-    int keyLength = 0;
-    
-    // TOTP instance - will be initialized after key decoding
-    TOTP* totp = nullptr;
-
-   
-    
-
-    // Current TOTP code (6 digits)
-    char currentTotpCode[7] = {0};
-
-    // Last NTP sync time
-    unsigned long lastNtpSync = 0;
-
-    // Last TOTP code generation time
-    unsigned long lastTotpUpdate = 0;
-
-    // NTP sync interval (1 hour = 3600000 ms)
-    const unsigned long NTP_SYNC_INTERVAL = 3600000;
-
-    // TOTP update interval (30 seconds = 30000 ms)
-    const unsigned long TOTP_UPDATE_INTERVAL = 30000;
-
-    // TOTP display mode flag (similar to showQRCode)
-    bool showTotpCode = false;
-    bool showTotpSecret = false;
-
-    // Global menu state
-    MenuState menuState = {};
-
-
-    // Forward declarations for callbacks
-    void cbBrightness();
-    void cbAbout();
-    void cbPetting();
-    void cbJumping();
-    void cbWash();
-    void cbSleep();
-    void cbWifiToggle();
-    void cbBluetoothToggle();
-    void cbMSAuth();
-    void cbTotpSetup();
-    void cbFeed();
-    void cbWifiTest();
-    void cbBluetoothTest();
-    void cbSaveSettings();
-
-    // WiFi callbacks
-    void cbWifiStatus();
-    void cbWifiScan();
-    void cbWifiForget();
-    void cbWifiConnect();
-    void cbAutoConnectToggle();
-    void cbShowQR();
-    void cbShowSSID();
-    void cbShowPassword();
-
-    // Forward declarations for helper functions
-    void updateWifiStatusText();
-    void updateConnectionsStatus();
-    void updateScannedNetworksList();
-    void updateSavedNetworksList();
-    void saveWifiNetwork(const char* ssid);
-    bool isWifiNetworkSaved(const char* ssid);
-    void loadSavedNetworks();
-    void cleanupGhostNetworks();
-    void connectToWifiNetwork(int index);
-    void setAutoConnect(int index, bool enabled);
-
-    // ============================================
-    // MENU TREE DEFINITION (Using helper functions)
-    // ============================================
-    // See menu.h for available helper functions:
-    //   menuFolder("Name")           - Creates a folder
-    //   menuAction("Name", callback)  - Creates an action
-    //   menuToggle("Name", cb, key)   - Creates a toggle
-    //   menuSlider("Name", val, cb, key) - Creates a slider
-    //   menuInput("Name", len, key)   - Creates an input
-    //   menuStatus("Name", callback)  - Creates a status display
-    // ============================================
-
-    // ============================================
-    // ROOT MENU ITEMS
-    // ============================================
-
-    MenuItem menuSettings = menuFolder("Settings");
-    MenuItem menuDemi     = menuFolder("Demi");
-    MenuItem menuWifi     = menuFolder("Wifi");
-    MenuItem menuBluetooth = menuFolder("Bluetooth");
-    MenuItem menuMSAuth   = menuFolder("MSAuth");
-
-    // ============================================
-    // SETTINGS SUBMENU
-    // ============================================
-
-    MenuItem menuBrightness    = menuSlider("Brightness", 128, cbBrightness, "brightness");
-    MenuItem menuAbout         = menuAction("About", cbAbout);
-    MenuItem menuSaveSettings  = menuAction("Save Settings", cbSaveSettings);
-
-    // ============================================
-    // BLUETOOTH SUBMENU
-    // ============================================
-
-    MenuItem menuBtEnabled   = menuToggle("Enabled", cbBluetoothToggle, "bt_enabled");
-    MenuItem menuBtSettings  = menuFolder("BT Settings");
-    MenuItem menuBtName       = menuInput("Device Name", 32, "bt_name");
-    MenuItem menuBtTest       = menuAction("Test BT", cbBluetoothTest);
-
-    // ============================================
-    // DEMI SUBMENU
-    // ============================================
-
-    MenuItem menuPlay     = menuFolder("Play");
-    MenuItem menuWash     = menuAction("Wash", cbWash);
-    MenuItem menuSleep    = menuAction("Sleep", cbSleep);
-    MenuItem menuFeed      = menuFolder("Feed");
-
-    // Play submenu
-    MenuItem menuPetting  = menuAction("Petting", cbPetting);
-    MenuItem menuJumping  = menuAction("Jumping", cbJumping);
-
-    // Feed -> Fridge submenu (food items)
-    MenuItem menuFridge     = menuFolder("Fridge");
-    MenuItem menuApple      = menuAction("Apple", cbFeed);
-    MenuItem menuBanana     = menuAction("Banana", cbFeed);
-    MenuItem menuOrange     = menuAction("Orange", cbFeed);
-    MenuItem menuGrape      = menuAction("Grape", cbFeed);
-    MenuItem menuStrawberry = menuAction("Strawberry", cbFeed);
-
-    // ============================================
-    // WIFI MENU ITEMS
-    // ============================================
-
-    static char wifiStatusText[20] = "Status: OFF";
-    MenuItem menuWifiStatus    = menuStatus(wifiStatusText, cbWifiStatus);
-    MenuItem menuWifiEnabled   = menuToggle("Toggle WiFi", cbWifiToggle, "wifi_enabled");
-    MenuItem menuConnectToNetwork = menuFolder("Connect to Network");
-    MenuItem menuScanNetworks  = menuFolder("Scan Networks");
-    MenuItem menuScanAction    = menuAction("SCAN", cbWifiScan);
-    MenuItem menuSavedNetworks = menuFolder("Saved Networks");
-    MenuItem menuWifiScanning  = menuFolder("SCANNING...");
-    MenuItem menuSavedStatus   = menuStatus("SAVED", nullptr);
-    MenuItem menuNoItems       = menuStatus("NO ITEMS INSIDE", nullptr);
-
-    // Dynamic network items for scanned networks
-    MenuItem menuWifiNetworks[MAX_WIFI_SCAN_RESULTS];
-
-    // Dynamic saved network items
-    MenuItem menuSavedNetworksList[MAX_SAVED_NETWORKS];
-    MenuItem menuSavedAutoConnect[MAX_SAVED_NETWORKS] = {
-        menuAction("Auto: OFF", cbAutoConnectToggle),
-        menuAction("Auto: OFF", cbAutoConnectToggle),
-        menuAction("Auto: OFF", cbAutoConnectToggle),
-        menuAction("Auto: OFF", cbAutoConnectToggle),
-        menuAction("Auto: OFF", cbAutoConnectToggle)
-    };
-
-    // Network submenu items - scanned networks use QR, saved networks use Connect
-    MenuItem menuNetworkConnect = menuAction("Connect", cbWifiConnect);
-    MenuItem menuNetworkForget = menuAction("Forget", cbWifiForget);
-    MenuItem menuNetworkQR      = menuAction("Connect via Phone (QR)", cbShowQR);
-
-    // Device Access folder
-    MenuItem menuDeviceAccess   = menuFolder("Device Access");
-    MenuItem menuDeviceQR       = menuAction("Show QR", cbShowQR);
-    MenuItem menuDeviceSSID     = menuAction("SSID: Demi-ESP32", cbShowSSID);
-    MenuItem menuDevicePassword = menuAction("Pass: demiesp32", cbShowPassword);
-
-    // ============================================
-    // MSAUTH SUBMENU (TOTP)
-    // ============================================
-
-    MenuItem menuTotpSetup      = menuAction("Setup Secret", cbTotpSetup);
-    MenuItem menuTotpShowCode   = menuAction("Show Code", cbMSAuth);
-
-    // ============================================
-    // CONNECTIONS (NEW - from menu_plan.md)
-    // ============================================
-
-    static char deviceToEsp32Status[24] = "Status: None";
-    static char deviceToEsp32Name[20] = "Name: Demi-ESP32";
-    static char deviceToEsp32Ip[24] = "IP: 192.168.4.1";
-    static char esp32ToNetworkStatus[24] = "Status: Not Connected";
-    static char esp32ToNetworkSsid[20] = "SSID: (none)";
-    static char esp32ToNetworkIp[24] = "IP: (none)";
-
-    MenuItem menuConnections      = menuFolder("Connections");
-    MenuItem menuDeviceToEsp32  = menuFolder("Device -> ESP32");
-    MenuItem menuD2EStatus    = menuStatus(deviceToEsp32Status, nullptr);
-    MenuItem menuD2EDeviceName = menuStatus(deviceToEsp32Name, nullptr);
-    MenuItem menuD2EDeviceIp   = menuStatus(deviceToEsp32Ip, nullptr);
-
-    MenuItem menuEsp32ToNetwork = menuFolder("ESP32 -> Network");
-    MenuItem menuE2NStatus     = menuStatus(esp32ToNetworkStatus, nullptr);
-    MenuItem menuE2NSsid        = menuStatus(esp32ToNetworkSsid, nullptr);
-    MenuItem menuE2NIp          = menuStatus(esp32ToNetworkIp, nullptr);
-    MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
-
-    // ============================================
-    // NTP SYNC FUNCTIONS
-    // ============================================
-
-    bool syncNtpTime() {
-        Serial.println("[NTP] Starting NTP sync...");
-
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.print("[NTP] WiFi status: ");
-            Serial.println(WiFi.status());
-            Serial.println("[NTP] No WiFi connection - skipping NTP sync");
-            return false;
-        }
-
-        Serial.println("[NTP] Configuring NTP...");
-        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-        Serial.println("[NTP] Waiting for NTP sync...");
-        time_t now = 0;
-        int retryCount = 0;
-        while ((now = time(nullptr)) < 1600000000 && retryCount < 15) {
-            delay(1000);
-            retryCount++;
-            Serial.print("[NTP] Waiting... (");
-            Serial.print(retryCount);
-            Serial.println("/15)");
-        }
-
-        if (now >= 1600000000) {
-            struct tm timeinfo;
-            if (localtime_r(&now, &timeinfo) != nullptr) {
-                Serial.println("[NTP] Time synchronized successfully");
-                Serial.print("[NTP] Current PH Time: ");
-                Serial.println(asctime(&timeinfo));
-            }
-            lastNtpSync = millis();
-            Serial.print("[NTP] Unix timestamp: ");
-            Serial.println(now);
-            return true;
-        }
-
-        Serial.println("[NTP] Failed to synchronize time");
-        return false;
-    }
 
     bool shouldSyncNtp() {
-        return (millis() - lastNtpSync) >= NTP_SYNC_INTERVAL;
+        return wifiShouldSyncNtp();
     }
 
     // ============================================
@@ -496,199 +448,14 @@ bool isEnteringPassword = false;
             menuBtName.stringValue[32] = '\0';
         }
 
-        // Load saved WiFi networks
-        loadSavedNetworks();
-        cleanupGhostNetworks();
-
         Serial.println("Settings loaded from preferences");
     }
 
-    // ============================================
-    // SAVED NETWORKS FUNCTIONS
-    // ============================================
 
-    void loadSavedNetworks() {
-        numSavedNetworks = preferences.getInt("wifi_net_count", 0);
-        Serial.print("[DEBUG] Number of saved networks: ");
-        Serial.println(numSavedNetworks);
-
-        if (numSavedNetworks > MAX_SAVED_NETWORKS) {
-            numSavedNetworks = MAX_SAVED_NETWORKS;
-        }
-        
-        for (int i = 0; i < numSavedNetworks; i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "wifi_ssid_%d", i);
-            String ssid = preferences.getString(key, "");
-            Serial.print("[DEBUG] Loaded SSID: ");
-            Serial.println(ssid);
-
-            snprintf(key, sizeof(key), "wifi_pass_%d", i);
-            String pass = preferences.getString(key, "");
-            Serial.print("[DEBUG] Loaded Password: ");
-            Serial.println(pass);
-
-            if (ssid.length() > 0) {
-                strncpy(savedNetworks[i].ssid, ssid.c_str(), 31);
-                savedNetworks[i].ssid[31] = '\0';
-                strncpy(savedNetworks[i].password, pass.c_str(), 63);
-                savedNetworks[i].password[63] = '\0';
-                savedNetworks[i].rssi = 0;
-                savedNetworks[i].encryption = WIFI_AUTH_OPEN;
-                savedNetworks[i].isConnected = false;
-                
-                snprintf(key, sizeof(key), "wifi_auto_%d", i);
-                savedNetworks[i].autoConnect = preferences.getBool(key, false);
-            } else {
-                Serial.print("[DEBUG] Ghost SSID at index ");
-                Serial.println(i);
-            }
-        }
-        
-        // Remove ghost SSIDs (empty entries) and compact array
-        int writeIdx = 0;
-        for (int i = 0; i < numSavedNetworks; i++) {
-            if (savedNetworks[i].ssid[0] != '\0') {
-                if (writeIdx != i) {
-                    savedNetworks[writeIdx] = savedNetworks[i];
-                }
-                writeIdx++;
-            }
-        }
-        numSavedNetworks = writeIdx;
-        preferences.putInt("wifi_net_count", numSavedNetworks);
-        
-        Serial.print("Loaded ");
-        Serial.print(numSavedNetworks);
-        Serial.println(" saved WiFi networks");
-    }
-
-    void cleanupGhostNetworks() {
-        int originalCount = numSavedNetworks;
-        int writeIdx = 0;
-        
-        for (int i = 0; i < numSavedNetworks; i++) {
-            if (savedNetworks[i].ssid[0] != '\0' && strlen(savedNetworks[i].ssid) > 0) {
-                if (writeIdx != i) {
-                    savedNetworks[writeIdx] = savedNetworks[i];
-                    char key[16];
-                    snprintf(key, sizeof(key), "wifi_ssid_%d", writeIdx);
-                    preferences.putString(key, savedNetworks[i].ssid);
-                    snprintf(key, sizeof(key), "wifi_pass_%d", writeIdx);
-                    preferences.putString(key, savedNetworks[i].password);
-                }
-                writeIdx++;
-            } else {
-                Serial.print("[WiFi] Removing ghost SSID at index ");
-                Serial.println(i);
-            }
-        }
-        
-        if (writeIdx < originalCount) {
-            numSavedNetworks = writeIdx;
-            preferences.putInt("wifi_net_count", numSavedNetworks);
-            Serial.print("[WiFi] Cleaned up ");
-            Serial.print(originalCount - numSavedNetworks);
-            Serial.println(" ghost networks");
-        }
-    }
-
-    void saveWifiNetwork(const char* ssid, const char* password = "") {
-        if (numSavedNetworks >= MAX_SAVED_NETWORKS) {
-            Serial.println("[WiFi] Max saved networks reached");
-            return;
-        }
-        
-        if (isWifiNetworkSaved(ssid)) {
-            Serial.println("[WiFi] Network already saved");
-            return;
-        }
-        
-        strncpy(savedNetworks[numSavedNetworks].ssid, ssid, 31);
-        savedNetworks[numSavedNetworks].ssid[31] = '\0';
-        
-        if (password != nullptr && strlen(password) > 0) {
-            strncpy(savedNetworks[numSavedNetworks].password, password, 63);
-            savedNetworks[numSavedNetworks].password[63] = '\0';
-        } else {
-            savedNetworks[numSavedNetworks].password[0] = '\0';
-        }
-        
-        savedNetworks[numSavedNetworks].rssi = 0;
-        savedNetworks[numSavedNetworks].encryption = WIFI_AUTH_OPEN;
-        savedNetworks[numSavedNetworks].isConnected = false;
-        savedNetworks[numSavedNetworks].autoConnect = false;
-        
-        char key[16];
-        snprintf(key, sizeof(key), "wifi_ssid_%d", numSavedNetworks);
-        preferences.putString(key, ssid);
-        
-        snprintf(key, sizeof(key), "wifi_pass_%d", numSavedNetworks);
-        if (password != nullptr && strlen(password) > 0) {
-            preferences.putString(key, password);
-        } else {
-            preferences.putString(key, "");
-        }
-        
-        snprintf(key, sizeof(key), "wifi_auto_%d", numSavedNetworks);
-        preferences.putBool(key, false);
-        
-        numSavedNetworks++;
-        preferences.putInt("wifi_net_count", numSavedNetworks);
-        
-        Serial.print("[WiFi] Saved network: ");
-        Serial.println(ssid);
-        Serial.print("[WiFi] Saved SSID: ");
-        Serial.println(savedNetworks[numSavedNetworks - 1].ssid);
-        Serial.print("[WiFi] Saved Password: ");
-        Serial.println(strlen(savedNetworks[numSavedNetworks - 1].password) > 0 ? 
-                       savedNetworks[numSavedNetworks - 1].password : "(none)");
-    }
-
-    bool isWifiNetworkSaved(const char* ssid) {
-        for (int i = 0; i < numSavedNetworks; i++) {
-            if (strcmp(savedNetworks[i].ssid, ssid) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void forgetWifiNetwork(int index) {
-        if (index < 0 || index >= numSavedNetworks) {
-            return;
-        }
-        
-        // Shift remaining networks
-        for (int i = index; i < numSavedNetworks - 1; i++) {
-            savedNetworks[i] = savedNetworks[i + 1];
-        }
-        numSavedNetworks--;
-        
-        // Clear ALL preferences for wifi keys and re-save remaining
-        for (int i = 0; i < MAX_SAVED_NETWORKS; i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "wifi_ssid_%d", i);
-            preferences.remove(key);
-            snprintf(key, sizeof(key), "wifi_pass_%d", i);
-            preferences.remove(key);
-        }
-        
-        for (int i = 0; i < numSavedNetworks; i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "wifi_ssid_%d", i);
-            preferences.putString(key, savedNetworks[i].ssid);
-            snprintf(key, sizeof(key), "wifi_pass_%d", i);
-            preferences.putString(key, savedNetworks[i].password);
-        }
-        
-        preferences.putInt("wifi_net_count", numSavedNetworks);
-        
-        Serial.println("[WiFi] Network forgotten");
-    }
 
     void updateSavedNetworksList() {
         static char savedDisplayNames[MAX_SAVED_NETWORKS][40];
+        static char autoLabels[MAX_SAVED_NETWORKS][20];  // Fixed: one buffer per network
         
         // Link saved networks as children of Saved Networks
         if (numSavedNetworks == 0) {
@@ -713,21 +480,21 @@ bool isEnteringPassword = false;
             menuSavedNetworksList[i].name = savedDisplayNames[i];
             menuSavedNetworksList[i].parent = &menuSavedNetworks;
             
-            // Link each saved network to Connect, Auto, and Forget actions
-            menuSavedNetworksList[i].firstChild = &menuNetworkConnect;
-            menuNetworkConnect.parent = &menuSavedNetworksList[i];
-            menuNetworkConnect.nextSibling = &menuSavedAutoConnect[i];
-            menuSavedAutoConnect[i].prevSibling = &menuNetworkConnect;
+            // Link each saved network to dedicated Connect, Auto, and Forget actions
+            menuSavedNetworksList[i].firstChild = &menuSavedConnect[i];
+            menuSavedConnect[i].parent = &menuSavedNetworksList[i];
+            menuSavedConnect[i].prevSibling = nullptr;
+            menuSavedConnect[i].nextSibling = &menuSavedAutoConnect[i];
+            menuSavedAutoConnect[i].prevSibling = &menuSavedConnect[i];
             menuSavedAutoConnect[i].parent = &menuSavedNetworksList[i];
-            menuSavedAutoConnect[i].nextSibling = &menuNetworkForget;
-            menuNetworkForget.prevSibling = &menuSavedAutoConnect[i];
-            menuNetworkForget.parent = &menuSavedNetworksList[i];
-            menuNetworkForget.nextSibling = nullptr;
+            menuSavedAutoConnect[i].nextSibling = &menuSavedForget[i];
+            menuSavedForget[i].prevSibling = &menuSavedAutoConnect[i];
+            menuSavedForget[i].parent = &menuSavedNetworksList[i];
+            menuSavedForget[i].nextSibling = nullptr;
             
-            // Update auto-connect toggle display
-            static char autoLabel[32];
-            snprintf(autoLabel, sizeof(autoLabel), "Auto: %s", savedNetworks[i].autoConnect ? "ON" : "OFF");
-            menuSavedAutoConnect[i].name = autoLabel;
+            // Update auto-connect toggle display (use separate buffer per index)
+            snprintf(autoLabels[i], sizeof(autoLabels[i]), "Auto: %s", savedNetworks[i].autoConnect ? "ON" : "OFF");
+            menuSavedAutoConnect[i].name = autoLabels[i];
             
             if (i == 0) {
                 menuSavedNetworks.firstChild = &menuSavedNetworksList[i];
@@ -742,36 +509,18 @@ bool isEnteringPassword = false;
             }
         }
     }
-    char connectionStatus[64] = "Status: Idle"; 
 
     void connectToWifiNetwork(int index) {
         if (index < 0 || index >= numSavedNetworks) {
-            snprintf(connectionStatus, sizeof(connectionStatus), "Status: Invalid Index");
             Serial.println("[WiFi] Invalid network index");
             return;
         }
 
-        snprintf(connectionStatus, sizeof(connectionStatus), "Status: Connecting...");
         Serial.print("[WiFi] Connecting to saved network: ");
         Serial.println(savedNetworks[index].ssid);
 
-        WiFi.begin(savedNetworks[index].ssid, savedNetworks[index].password);
-
-        unsigned long startAttemptTime = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) { // 10-second timeout
-            delay(500);
-            Serial.print(".");
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            snprintf(connectionStatus, sizeof(connectionStatus), "Status: Connected");
-            Serial.println("\n[WiFi] Successfully connected to network");
-        } else {
-            snprintf(connectionStatus, sizeof(connectionStatus), "Status: Failed");
-            Serial.println("\n[WiFi] Failed to connect to network");
-        }
-
-        menuState.needsRedraw = true; // Update the menu display
+        // Use non-blocking async connect
+        wifiConnectAsync(savedNetworks[index].ssid, savedNetworks[index].password);
     }
 
     // ============================================
@@ -788,6 +537,9 @@ bool isEnteringPassword = false;
         menuBluetooth.prevSibling = &menuWifi;
         menuBluetooth.nextSibling = &menuMSAuth;
         menuMSAuth.prevSibling = &menuBluetooth;
+        menuMSAuth.nextSibling = &menuPayloads;
+        menuPayloads.prevSibling = &menuMSAuth;
+        menuPayloads.nextSibling = nullptr;
 
         // Settings children: Brightness -> About -> Save Settings
         menuSettings.firstChild = &menuBrightness;
@@ -850,11 +602,16 @@ bool isEnteringPassword = false;
         // WiFi Toggle
         menuWifiEnabled.parent = &menuWifi;
         menuWifiEnabled.prevSibling = nullptr;  // first child
-        menuWifiEnabled.nextSibling = &menuConnections;
+        menuWifiEnabled.nextSibling = &menuWifiDisconnect;
+
+        // WiFi Disconnect
+        menuWifiDisconnect.parent = &menuWifi;
+        menuWifiDisconnect.prevSibling = &menuWifiEnabled;
+        menuWifiDisconnect.nextSibling = &menuConnections;
 
         // Connections
         menuConnections.parent = &menuWifi;
-        menuConnections.prevSibling = &menuWifiEnabled;
+        menuConnections.prevSibling = &menuWifiDisconnect;
         menuConnections.nextSibling = &menuConnectToNetwork;
 
         // Connect to Network
@@ -945,6 +702,21 @@ bool isEnteringPassword = false;
             menuSavedNetworksList[i].parent = &menuSavedNetworks;
             menuSavedNetworksList[i].nextSibling = nullptr;
             menuSavedNetworksList[i].prevSibling = nullptr;
+
+            menuSavedConnect[i].parent = nullptr;
+            menuSavedConnect[i].firstChild = nullptr;
+            menuSavedConnect[i].prevSibling = nullptr;
+            menuSavedConnect[i].nextSibling = nullptr;
+
+            menuSavedAutoConnect[i].parent = nullptr;
+            menuSavedAutoConnect[i].firstChild = nullptr;
+            menuSavedAutoConnect[i].prevSibling = nullptr;
+            menuSavedAutoConnect[i].nextSibling = nullptr;
+
+            menuSavedForget[i].parent = nullptr;
+            menuSavedForget[i].firstChild = nullptr;
+            menuSavedForget[i].prevSibling = nullptr;
+            menuSavedForget[i].nextSibling = nullptr;
         }
         // Network submenu: Connect -> Forget -> QR (for scanned networks)
         menuNetworkConnect.parent = nullptr;
@@ -970,88 +742,62 @@ bool isEnteringPassword = false;
     // ============================================
 
     void initMenu() {
-        // Link all menu items
-        linkMenuItems();
+        if (!menuSystemInitialized) {
+            linkMenuItems();
 
-        // Start at root
+            // Initialize preferences and load saved settings once.
+            initPreferences();
+            loadAllSettings();
+            updateSavedNetworksList();
+
+            initTotp();
+
+            if (hasTotpKey()) {
+                Serial.println("[initMenu] TOTP initialized with hardcoded secret");
+                Serial.print("[initMenu] TOTP key bytes: ");
+                for (int i = 0; i < keyLength; i++) {
+                    if (i > 0) Serial.print(", ");
+                    Serial.print("0x");
+                    Serial.print(hmacKey[i], HEX);
+                }
+                Serial.println();
+                generateTotpCode();
+            } else {
+                Serial.println("[initMenu] Warning: TOTP hmacKey is all zeros");
+            }
+
+            menuSystemInitialized = true;
+        }
+
+        wifiReloadSavedNetworks();
+        updateSavedNetworksList();
+
+        // Start at root for each menu entry, but don't reinitialize services.
         menuState.currentMenu = nullptr;
         menuState.selectedItem = &menuSettings;
         menuState.scrollOffset = 0;
         menuState.needsRedraw = true;
         menuState.isEditing = false;
         menuState.justEntered = false;
-
-        // Initialize preferences and load saved settings
-        initPreferences();
-        loadAllSettings();
-
-        // Update saved networks list
-        updateSavedNetworksList();
-
-        // TOTP is already initialized as static instance, just generate initial code
-        if (hasTotpKey()) {
-            Serial.println("[initMenu] TOTP initialized with hardcoded secret");
-            Serial.print("[initMenu] TOTP key bytes: ");
-            for (int i = 0; i < keyLength; i++) {
-                if (i > 0) Serial.print(", ");
-                Serial.print("0x");
-                Serial.print(hmacKey[i], HEX);
-            }
-            Serial.println();
-            generateTotpCode();  // Generate initial code
-        } else {
-            Serial.println("[initMenu] Warning: TOTP hmacKey is all zeros");
-        }
-
-        // Sync NTP on startup and generate code AFTER syncing
-        if (syncNtpTime()) {
-            generateTotpCode();
-        }
-
-        // Apply WiFi settings on startup
-        if (menuWifiEnabled.boolValue) {
-            Serial.println("[initMenu] WiFi was enabled, starting AP...");
-            WiFi.mode(WIFI_AP_STA);
-            delay(200);
-            bool apStarted = WiFi.softAP("Demi-ESP32", "demiesp32");
-            delay(200);
-            Serial.print("  WiFi mode: ");
-            Serial.println(WiFi.getMode());
-            Serial.print("  AP started: ");
-            Serial.println(apStarted ? "yes" : "no");
-            Serial.print("  AP IP: ");
-            Serial.println(WiFi.softAPIP());
-            Serial.print("  AP SSID: ");
-            Serial.println(WiFi.softAPSSID());
-
-            startCaptivePortal();
-            
-            // Auto-scan for available WiFi networks on startup
-            Serial.println("[initMenu] Starting auto-scan for WiFi networks...");
-            WiFi.scanNetworks(true);  // Start async scan
-            numScanResults = 0;
-            isWifiScanning = true;
-        }
     }
 
 
     void updateConnectionsStatus() {
-        wifi_mode_t mode = WiFi.getMode();
-
-        if ((mode & WIFI_AP) == WIFI_AP) {
+        if (wifiIsApActive()) {
             snprintf(deviceToEsp32Status, sizeof(deviceToEsp32Status), "Status: Active");
-            snprintf(deviceToEsp32Name, sizeof(deviceToEsp32Name), "Name: %s", WiFi.softAPSSID().c_str());
-            snprintf(deviceToEsp32Ip, sizeof(deviceToEsp32Ip), "IP: %s", WiFi.softAPIP().toString().c_str());
+            snprintf(deviceToEsp32Name, sizeof(deviceToEsp32Name), "Name: %s", wifiGetApSSID().c_str());
+            snprintf(deviceToEsp32Ip, sizeof(deviceToEsp32Ip), "IP: %s", wifiGetApIP().c_str());
         } else {
             snprintf(deviceToEsp32Status, sizeof(deviceToEsp32Status), "Status: None");
             snprintf(deviceToEsp32Name, sizeof(deviceToEsp32Name), "Name: (none)");
             snprintf(deviceToEsp32Ip, sizeof(deviceToEsp32Ip), "IP: (none)");
         }
 
-        if (WiFi.status() == WL_CONNECTED) {
+        // Use WiFiHandler status
+        if (wifiIsConnected()) {
             snprintf(esp32ToNetworkStatus, sizeof(esp32ToNetworkStatus), "Status: Connected");
-            snprintf(esp32ToNetworkSsid, sizeof(esp32ToNetworkSsid), "SSID: %s", WiFi.SSID().c_str());
-            snprintf(esp32ToNetworkIp, sizeof(esp32ToNetworkIp), "IP: %s", WiFi.localIP().toString().c_str());
+            snprintf(esp32ToNetworkSsid, sizeof(esp32ToNetworkSsid), "SSID: %s", wifiGetCurrentSSID().c_str());
+            snprintf(esp32ToNetworkIp, sizeof(esp32ToNetworkIp), "IP: %s", wifiGetLocalIP().toString().c_str());
         } else {
             snprintf(esp32ToNetworkStatus, sizeof(esp32ToNetworkStatus), "Status: Not Connected");
             snprintf(esp32ToNetworkSsid, sizeof(esp32ToNetworkSsid), "SSID: (none)");
@@ -1107,7 +853,13 @@ bool isEnteringPassword = false;
         
         // Update saved networks list when entering Saved Networks
         if (menu == &menuSavedNetworks) {
+            wifiReloadSavedNetworks();
             updateSavedNetworksList();
+        }
+
+        // Update scanned networks list whenever entering Scan Networks
+        if (menu == &menuScanNetworks) {
+            updateScannedNetworksList();
         }
 
         if (menu->firstChild == nullptr) {
@@ -1119,7 +871,7 @@ bool isEnteringPassword = false;
     void updateWifiStatusText() {
         if (!menuWifiEnabled.boolValue) {
             snprintf(wifiStatusText, sizeof(wifiStatusText), "Status: OFF");
-        } else if (WiFi.status() == WL_CONNECTED) {
+        } else if (wifiIsConnected()) {
             snprintf(wifiStatusText, sizeof(wifiStatusText), "Status: CONNECTED");
         } else {
             snprintf(wifiStatusText, sizeof(wifiStatusText), "Status: NOT CONNECTED");
@@ -1308,10 +1060,7 @@ bool isEnteringPassword = false;
         if (!menuState.selectedItem) return;
 
         if (menuState.selectedItem->type == MENU_FOLDER) {
-            // Automatically start scanning for Wi-Fi networks when entering the menu
-            if (menuState.selectedItem == &menuWifi) {
-                updateScannedNetworksList();
-            }
+            // Do not auto-scan when entering WiFi menu
 
             // Check if entering a scanned network folder
             isInScannedNetwork = false;
@@ -1544,9 +1293,9 @@ bool isEnteringPassword = false;
 
         if (showTotpCode) {
             time_t now;
-            
+
             // Check if WiFi is still connected
-            if (WiFi.status() != WL_CONNECTED) {
+            if (!wifiIsConnected()) {
                 u8g2.clearBuffer();
                 u8g2.setFont(u8g2_font_6x10_tf);
                 u8g2.setDrawColor(1);
@@ -1563,8 +1312,8 @@ bool isEnteringPassword = false;
             }
 
             // Try to sync NTP if not synced
-            if (shouldSyncNtp() && WiFi.status() == WL_CONNECTED) {
-                syncNtpTime();
+            if (shouldSyncNtp() && wifiIsConnected()) {
+                // NTP sync handled by WiFiHandler
             }
 
             // Generate code only if time is synced
@@ -1590,7 +1339,7 @@ bool isEnteringPassword = false;
 
             // Draw glyphs in top right corner (126x64 display)
             u8g2.setFont(u8g2_font_siji_t_6x10);
-            if (WiFi.status() == WL_CONNECTED) {
+            if (wifiIsConnected()) {
                 u8g2.drawGlyph(100, 10, 0xE21A);  // WiFi icon
             }
             if (lastNtpSync > 0 && (millis() - lastNtpSync) < NTP_SYNC_INTERVAL) {
@@ -1666,71 +1415,23 @@ bool isEnteringPassword = false;
 
         // Check if WiFi is currently scanning - show animated "Scanning..." instead of path
         if (isWifiScanning) {
-            // Check scan progress
-            int status = WiFi.scanComplete();
-            if (status == WIFI_SCAN_RUNNING) {
-                // Get current count of found networks
-                int current = WiFi.scanNetworks();
-                if (current > numScanResults) {
-                    // New networks found, update the list
-                    int newCount = current - numScanResults;
-                for (int i = numScanResults; i < current && i < MAX_WIFI_SCAN_RESULTS; i++) {
-                    strncpy(scanResults[i].ssid, WiFi.SSID(i).c_str(), 32);
-                    scanResults[i].ssid[32] = '\0';
-                    scanResults[i].password[0] = '\0';
-                    scanResults[i].rssi = WiFi.RSSI(i);
-                    scanResults[i].encryption = WiFi.encryptionType(i);
-                    scanResults[i].isConnected = (WiFi.status() == WL_CONNECTED && WiFi.SSID(i) == WiFi.SSID());
-                }
-                    numScanResults = min(current, MAX_WIFI_SCAN_RESULTS);
-                    updateScannedNetworksList();
-                    Serial.print("[WiFi] Progressive update: ");
-                    Serial.print(numScanResults);
-                    Serial.println(" networks found so far");
-                }
-                strcpy(scanStatus, "Scanning");
-            } else if (status >= 0) {
-                // Scan completed successfully
-                int final = status;
-                if (final > numScanResults) {
-                    // Update any remaining networks
-            for (int i = numScanResults; i < final && i < MAX_WIFI_SCAN_RESULTS; i++) {
-                strncpy(scanResults[i].ssid, WiFi.SSID(i).c_str(), 32);
-                scanResults[i].ssid[32] = '\0';
-                scanResults[i].password[0] = '\0';
-                scanResults[i].rssi = WiFi.RSSI(i);
-                scanResults[i].encryption = WiFi.encryptionType(i);
-                scanResults[i].isConnected = (WiFi.status() == WL_CONNECTED && WiFi.SSID(i) == WiFi.SSID());
-            }
-                    numScanResults = min(final, MAX_WIFI_SCAN_RESULTS);
-                    updateScannedNetworksList();
-                }
-                Serial.print("[WiFi] Scan completed: ");
-                Serial.print(numScanResults);
-                Serial.println(" networks found");
-                isWifiScanning = false;
-                scanFailTime = 0;
-            } else {
-                // Scan failed
-                Serial.println("[WiFi] Scan failed");
-                numScanResults = 0;
-                strcpy(scanStatus, "Scan Failed");
-                scanFailTime = millis();
-                // Keep isWifiScanning true to show message for 2 seconds
-            }
+            strcpy(scanStatus, "Scanning");
+            // Animated scanning text
+            static const char* scanDots[] = {".", "..", "..."};
+            uint8_t dotIndex = (millis() / 500) % 3;
+            char scanText[20];
+            snprintf(scanText, sizeof(scanText), "%s%s", scanStatus, scanDots[dotIndex]);
+            u8g2.drawStr(0, 8, scanText);
+        } else if (numScanResults == 0) {
+            strncpy(scanStatus, "No WiFi sources nearby", sizeof(scanStatus)-1);
+            scanStatus[sizeof(scanStatus)-1] = '\0';
+            scanFailTime = millis();
+            u8g2.drawStr(0, 8, scanStatus);
+        } else {
+            scanFailTime = 0;
+        }
 
-            // Display scan status
-            if (strcmp(scanStatus, "Scanning") == 0) {
-                // Animated scanning text
-                static const char* scanDots[] = {".", "..", "..."};
-                uint8_t dotIndex = (millis() / 500) % 3;
-                char scanText[20];
-                snprintf(scanText, sizeof(scanText), "%s%s", scanStatus, scanDots[dotIndex]);
-                u8g2.drawStr(0, 8, scanText);
-            } else {
-                // Static text for failed
-                u8g2.drawStr(0, 8, scanStatus);
-            }
+        if (isWifiScanning || numScanResults == 0) {
             u8g2.drawLine(0, 12, 127, 12);
         } else {
             // Build full path
@@ -1766,7 +1467,7 @@ bool isEnteringPassword = false;
         }
 
         // Handle scan failure timeout
-        if (scanFailTime > 0 && millis() - scanFailTime > 2000) {
+        if (scanFailTime > 0 && millis() - scanFailTime > 3000) {
             isWifiScanning = false;
             scanFailTime = 0;
             menuState.needsRedraw = true;
@@ -1888,27 +1589,23 @@ bool isEnteringPassword = false;
         Serial.println(menuWifiEnabled.boolValue ? "ON" : "OFF");
 
         if (menuWifiEnabled.boolValue) {
-            WiFi.mode(WIFI_AP_STA);
+            bool apStarted = wifiStartAp();
             delay(200);
-            
-            bool apStarted = WiFi.softAP("Demi-ESP32", "demiesp32");
-            delay(200);
-            Serial.print("  WiFi mode: ");
-            Serial.println(WiFi.getMode());
             Serial.print("  AP started: ");
             Serial.println(apStarted ? "yes" : "no");
             Serial.print("  AP IP: ");
-            Serial.println(WiFi.softAPIP());
+            Serial.println(wifiGetApIP().c_str());
             Serial.print("  AP SSID: ");
-            Serial.println(WiFi.softAPSSID());
+            Serial.println(wifiGetApSSID().c_str());
             
             startCaptivePortal();
+            wifiStartAutoConnectScan();
         } else {
             stopCaptivePortal();
             
-            WiFi.disconnect(true, true);
-            WiFi.softAPdisconnect(true);
-            WiFi.mode(WIFI_OFF);
+            wifiDisconnect();
+            wifiStopAp();
+            wifiSetMode(WIFI_OFF);
             Serial.println("  WiFi disabled");
         }
 
@@ -1922,6 +1619,9 @@ bool isEnteringPassword = false;
     }
 
     void cbWifiScan() {
+        static unsigned long lastScanAttempt = 0;
+        static int scanRetryCount = 0;
+        
         Serial.println("Menu: WiFi scan triggered");
 
         if (!menuWifiEnabled.boolValue) {
@@ -1929,22 +1629,30 @@ bool isEnteringPassword = false;
             beepLowC(100);
             return;
         }
+        
+        // Exponential backoff: min 1s, max 30s between manual scan attempts
+        unsigned long cooldown = min(1000 * (1 << scanRetryCount), 30000);
+        if (millis() - lastScanAttempt < cooldown) {
+            Serial.printf("  Scan cooldown active, wait %lums\n", cooldown - (millis() - lastScanAttempt));
+            return;
+        }
+        
+        lastScanAttempt = millis();
+        scanRetryCount++;
 
         // Start asynchronous scan
-        wifi_mode_t currentMode = WiFi.getMode();
-        if (currentMode == WIFI_OFF) {
-            WiFi.mode(WIFI_AP_STA);
-        } else if (currentMode == WIFI_STA) {
-            WiFi.mode(WIFI_AP_STA);
+        if (!wifiIsApActive()) {
+            wifiSetMode(WIFI_AP_STA);
         }
         delay(100);
 
         Serial.println("  Starting asynchronous WiFi scan...");
-        WiFi.scanNetworks(true);  // Start async scan
+        wifiScan();  // Use WiFiHandler for async scan
 
-        numScanResults = 0;  // Reset for progressive updates
-        isWifiScanning = true;
         menuState.needsRedraw = true;
+        
+        // Reset retry count on successful scan start
+        scanRetryCount = 0;
     }
 
     void cbWifiConnect() {
@@ -2011,46 +1719,30 @@ bool isEnteringPassword = false;
             return;
         }
 
-        // Attempt connection
+        // Attempt connection - non-blocking, status via getConnectionStatus()
         if (encryption == WIFI_AUTH_OPEN || (password != nullptr && strlen(password) > 0)) {
             if (encryption == WIFI_AUTH_OPEN) {
-                Serial.println("[WiFi] Connecting to open network...");
+                Serial.println("[WiFi] Connecting to open network (non-blocking)...");
                 Serial.print("[WiFi] SSID: ");
                 Serial.println(ssid);
-                WiFi.begin(ssid);
+                wifiConnectAsync(ssid, nullptr);
             } else {
-                Serial.println("[WiFi] Connecting with password...");
+                Serial.println("[WiFi] Connecting to secured network (non-blocking)...");
                 Serial.print("[WiFi] SSID: ");
                 Serial.println(ssid);
-                Serial.print("[WiFi] Password: ");
-                Serial.println(password);
-                WiFi.begin(ssid, password);
+                wifiConnectAsync(ssid, password);
             }
-
-            delay(5000); // Wait for connection attempt
-
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("[WiFi] Successfully connected!");
-                Serial.print("[WiFi] Connected SSID: ");
-                Serial.println(WiFi.SSID());
-                // Save network with password for future reconnection
-                saveWifiNetwork(ssid, password);
-                updateConnectionsStatus();
-            } else {
-                Serial.println("[WiFi] Connection failed.");
-                beepLowC(150);
-            }
+            
+            // Don't wait - connection status is now tracked in wifiTask
+            // User can see status via getConnectionStatus() if needed
         } else {
             Serial.println("[WiFi] Network requires authentication but no password available.");
             beepLowC(100);
         }
 
-        // Ensure AP is still running
-        WiFi.mode(WIFI_AP_STA);
-        delay(100);
-        bool apStarted = WiFi.softAP("Demi-ESP32", "demiesp32");
-        Serial.print("  AP restarted: ");
-        Serial.println(apStarted ? "yes" : "no");
+        // Ensure AP is still running (non-blocking)
+        wifiSetMode(WIFI_AP_STA);
+        // Note: softAP will be started by wifiTask after mode change
 
         menuState.needsRedraw = true;
     }
@@ -2071,24 +1763,14 @@ bool isEnteringPassword = false;
             // Go back after forgetting
             menuGoBack();
             menuState.needsRedraw = true;
-            return;
         }
+    }
 
-        // Also check current item directly (for scanned networks)
-        MenuItem* currentItem = menuState.selectedItem;
-        for (int i = 0; i < numSavedNetworks; i++) {
-            if (currentItem == &menuSavedNetworksList[i]) {
-                Serial.print("  Forgetting network: ");
-                Serial.println(savedNetworks[i].ssid);
-                forgetWifiNetwork(i);
-                updateSavedNetworksList();
-                cleanupGhostNetworks();
-                menuState.needsRedraw = true;
-                return;
-            }
-        }
-
-        Serial.println("  No saved network selected");
+    void cbWifiDisconnect() {
+        Serial.println("Menu: WiFi Disconnect");
+        wifiDisconnect();
+        snprintf(wifiStatusText, sizeof(wifiStatusText), "Status: DISCONNECTED");
+        menuState.needsRedraw = true;
     }
 
     void cbAutoConnectToggle() {
@@ -2098,28 +1780,26 @@ bool isEnteringPassword = false;
         
         // Only allow from saved networks
         if (isInSavedNetwork && networkIdx >= 0 && networkIdx < numSavedNetworks) {
-            // Toggle auto-connect (only one at a time)
-            if (!savedNetworks[networkIdx].autoConnect) {
-                // Disable all other auto-connect first
-                for (int i = 0; i < numSavedNetworks; i++) {
-                    if (savedNetworks[i].autoConnect && i != networkIdx) {
-                        savedNetworks[i].autoConnect = false;
-                        char key[16];
-                        snprintf(key, sizeof(key), "wifi_auto_%d", i);
-                        preferences.putBool(key, false);
-                    }
+            bool newValue = !savedNetworks[networkIdx].autoConnect;
+            const char* targetSsid = savedNetworks[networkIdx].ssid;
+            if (!wifiSetSavedNetworkAutoConnectBySsid(targetSsid, newValue)) {
+                Serial.println("  Failed to update auto-connect");
+                return;
+            }
+            wifiReloadSavedNetworks();
+            updateSavedNetworksList();
+
+            for (int i = 0; i < numSavedNetworks; i++) {
+                if (strcmp(savedNetworks[i].ssid, targetSsid) == 0) {
+                    selectedNetworkIndex = i;
+                    menuState.selectedItem = &menuSavedAutoConnect[i];
+                    Serial.print("  Auto-connect: ");
+                    Serial.println(savedNetworks[i].autoConnect ? "ON" : "OFF");
+                    menuState.needsRedraw = true;
+                    return;
                 }
             }
-            savedNetworks[networkIdx].autoConnect = !savedNetworks[networkIdx].autoConnect;
             
-            char key[16];
-            snprintf(key, sizeof(key), "wifi_auto_%d", networkIdx);
-            preferences.putBool(key, savedNetworks[networkIdx].autoConnect);
-            
-            Serial.print("  Auto-connect: ");
-            Serial.println(savedNetworks[networkIdx].autoConnect ? "ON" : "OFF");
-            
-            updateSavedNetworksList();
             menuState.needsRedraw = true;
             return;
         }
@@ -2129,27 +1809,26 @@ bool isEnteringPassword = false;
         for (int i = 0; i < numSavedNetworks; i++) {
             if (currentItem == &menuSavedAutoConnect[i]) {
                 networkIdx = i;
-                
-                if (!savedNetworks[networkIdx].autoConnect) {
-                    for (int j = 0; j < numSavedNetworks; j++) {
-                        if (savedNetworks[j].autoConnect && j != networkIdx) {
-                            savedNetworks[j].autoConnect = false;
-                            char key[16];
-                            snprintf(key, sizeof(key), "wifi_auto_%d", j);
-                            preferences.putBool(key, false);
-                        }
+                bool newValue = !savedNetworks[networkIdx].autoConnect;
+                const char* targetSsid = savedNetworks[networkIdx].ssid;
+                if (!wifiSetSavedNetworkAutoConnectBySsid(targetSsid, newValue)) {
+                    Serial.println("  Failed to update auto-connect");
+                    return;
+                }
+                wifiReloadSavedNetworks();
+                updateSavedNetworksList();
+
+                for (int j = 0; j < numSavedNetworks; j++) {
+                    if (strcmp(savedNetworks[j].ssid, targetSsid) == 0) {
+                        selectedNetworkIndex = j;
+                        menuState.selectedItem = &menuSavedAutoConnect[j];
+                        Serial.print("  Auto-connect: ");
+                        Serial.println(savedNetworks[j].autoConnect ? "ON" : "OFF");
+                        menuState.needsRedraw = true;
+                        return;
                     }
                 }
-                savedNetworks[networkIdx].autoConnect = !savedNetworks[networkIdx].autoConnect;
-                
-                char key[16];
-                snprintf(key, sizeof(key), "wifi_auto_%d", networkIdx);
-                preferences.putBool(key, savedNetworks[networkIdx].autoConnect);
-                
-                Serial.print("  Auto-connect: ");
-                Serial.println(savedNetworks[networkIdx].autoConnect ? "ON" : "OFF");
-                
-                updateSavedNetworksList();
+
                 menuState.needsRedraw = true;
                 return;
             }
@@ -2182,7 +1861,8 @@ bool isEnteringPassword = false;
         Serial.println("Menu: MSAuth action selected");
 
         // Check if WiFi is connected - required for NTP sync
-        if (WiFi.status() != WL_CONNECTED) {
+        // Use WiFiHandler status
+        if (!wifiIsConnected()) {
             Serial.println("[TOTP] WiFi not connected - cannot generate valid TOTP codes");
             Serial.println("[TOTP] Please connect to WiFi first via Wifi menu");
             beepLowC(100);
@@ -2198,8 +1878,7 @@ bool isEnteringPassword = false;
 
         // Force NTP sync before showing code
         Serial.println("[TOTP] Syncing NTP time before generating code...");
-        syncNtpTime();
-        delay(500);  // Give time for sync
+        // syncNtpTime() handled by WiFiHandler
 
         showTotpCode = true;
         menuState.needsRedraw = true;
@@ -2241,7 +1920,7 @@ bool isEnteringPassword = false;
         Serial.println("Menu: WiFi Test action!");
         if (menuWifiEnabled.boolValue) {
             Serial.print("  WiFi is ON, status: ");
-            Serial.println(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "NOT CONNECTED");
+            Serial.println(wifiIsConnected() ? "CONNECTED" : "NOT CONNECTED");
         } else {
             Serial.println("  WiFi is OFF - enable first");
             beepLowC(100);
@@ -2253,10 +1932,7 @@ bool isEnteringPassword = false;
     void updateTotpInBackground() {
         unsigned long currentMillis = millis();
 
-        // Try to sync NTP if needed
-        if (shouldSyncNtp() && WiFi.status() == WL_CONNECTED) {
-            syncNtpTime();
-        }
+        // NTP sync handled by WiFiHandler
 
         // Only update code if time is synced
         time_t now = time(nullptr);

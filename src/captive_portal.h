@@ -9,10 +9,8 @@
 #include <esp_task.h>
 #include "menu.h"
 
-// External references from menu.cpp
-extern bool isWifiScanning;
-extern WifiScanResult scanResults[MAX_WIFI_SCAN_RESULTS];
-extern int numScanResults;
+// External references (now defined in WiFiHandler.h via menu.h)
+// isWifiScanning, scanResults, numScanResults are accessed via menu.h includes
 
 // External references
 extern Preferences preferences;
@@ -28,12 +26,21 @@ extern AsyncWebServer captiveServer;
 #define CAPTIVE_AP_SSID "Demi-ESP32"
 #define CAPTIVE_AP_PASSWORD "demiesp32"
 
+static bool captivePortalRoutesRegistered = false;
+static bool captivePortalRunning = false;
+
 // Start captive portal web server
 void startCaptivePortal() {
+    if (captivePortalRunning) {
+        Serial0.println("[CaptivePortal] Web server already running");
+        return;
+    }
+
     Serial0.println("[CaptivePortal] Starting web server...");
-    
-    // Root page - WiFi configuration form
-    captiveServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+
+    if (!captivePortalRoutesRegistered) {
+        // Root page - WiFi configuration form
+        captiveServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         String html = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -248,10 +255,10 @@ void startCaptivePortal() {
 )rawliteral";
         
         request->send(200, "text/html", html);
-    });
-    
-    // Return available WiFi networks (use cached scan results from menu)
-    captiveServer.on("/networks", HTTP_GET, [](AsyncWebServerRequest *request) {
+        });
+        
+        // Return available WiFi networks (use cached scan results from menu)
+        captiveServer.on("/networks", HTTP_GET, [](AsyncWebServerRequest *request) {
         String json = "[";
         
         // Use cached scan results from menu system
@@ -272,10 +279,10 @@ void startCaptivePortal() {
         Serial0.println(" networks");
         
         request->send(200, "application/json", json);
-    });
-    
-    // Handle WiFi connection
-    captiveServer.on("/connect", HTTP_POST, [](AsyncWebServerRequest *request) {
+        });
+        
+        // Handle WiFi connection
+        captiveServer.on("/connect", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
             String ssid = request->getParam("ssid", true)->value();
             String password = request->getParam("password", true)->value();
@@ -320,10 +327,10 @@ void startCaptivePortal() {
         } else {
             request->send(400, "application/json", "{\"success\":false,\"message\":\"Missing parameters\"}");
         }
-    });
-    
-// Trigger WiFi scan (runs on Core 0)
-    captiveServer.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+        });
+        
+        // Trigger WiFi scan (runs on Core 0)
+        captiveServer.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
         Serial0.println("[CaptivePortal] /scan - triggering WiFi scan on Core 0");
         
         // Set scanning flag
@@ -367,22 +374,30 @@ void startCaptivePortal() {
             nullptr,
             0  // Core 0
         );
-    });
-    
-    // Catch-all for captive portal redirect
-    captiveServer.onNotFound([](AsyncWebServerRequest *request) {
+        });
+        
+        // Catch-all for captive portal redirect
+        captiveServer.onNotFound([](AsyncWebServerRequest *request) {
         request->redirect("/");
-    });
+        });
+
+        captivePortalRoutesRegistered = true;
+    }
     
     // Start server
     captiveServer.begin();
+    captivePortalRunning = true;
     Serial0.println("[CaptivePortal] Web server started on http://192.168.4.1");
 }
 
 // Stop captive portal
 void stopCaptivePortal() {
+    if (!captivePortalRunning) {
+        return;
+    }
     Serial0.println("[CaptivePortal] Stopping web server...");
     captiveServer.end();
+    captivePortalRunning = false;
 }
 
 #endif // CAPTIVE_PORTAL_H

@@ -6,6 +6,7 @@
 #include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 #include <esp_task.h>
+#include "WiFiHandler.h"
 
 // External U8G2 display instance (defined in main.cpp)
 extern U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2;
@@ -214,29 +215,28 @@ extern MenuState menuState;
 // Preferences instance for saving settings
 extern Preferences preferences;
 
-// WiFi scan result structure and arrays (defined in menu.cpp)
-struct WifiScanResult {
-    char ssid[32];
-    char password[64];
-    int rssi;
-    bool isConnected;
-    bool autoConnect;
-    wifi_auth_mode_t encryption;
-};
-
-#define MAX_WIFI_SCAN_RESULTS 10
 #define MAX_SAVED_NETWORKS 5
 
-// External declarations for WiFi scan (defined in menu.cpp)
+// External declarations for WiFi scan (defined in WiFiHandler.cpp)
 extern WifiScanResult scanResults[MAX_WIFI_SCAN_RESULTS];
 extern WifiScanResult savedNetworks[MAX_SAVED_NETWORKS];
 extern int numScanResults;
 extern int numSavedNetworks;
 extern bool isWifiScanning;
+extern bool isAutoConnectScan;
+extern bool noSavedNetworksInRange;
 
 // Initialize menu system
 void initMenu();
 void updateTotpInBackground();
+
+// WiFi public API (defined in main.cpp)
+void wifiConnect(const char* ssid, const char* password);
+void wifiConnectAsync(const char* ssid, const char* password);
+const char* getConnectionStatus();
+void wifiScan();
+void wifiSetMode(wifi_mode_t mode);
+void wifiDisconnect();
 
 // Buzzer functions (defined in main.cpp)
 void beepE5(uint16_t durationMs);

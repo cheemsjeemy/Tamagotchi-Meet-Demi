@@ -3,17 +3,18 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <Preferences.h>
-
+#include "DemiHandler.h"
+#include "menu.h"
 #include "sprite_idle.h"
 #include "sprite_alert.h"
-#include "menu.h"
 #include <esp_task_wdt.h>
+#include "WiFiHandler.h"
 
-// External WiFi network data from menu.cpp
-extern WifiScanResult savedNetworks[];
-extern int numSavedNetworks;
+// NTP constants
+static const long gmtOffset_sec = 28800;
+static const int daylightOffset_sec = 0;
 
-// Forward declaration for main loop task
+// Forward declaration for tasks
 void mainLoopTask(void* param);
 
 // Pins as requested
@@ -89,53 +90,23 @@ void beepLowC(uint16_t durationMs = 100) {
 // Display margins
 #define MARGIN 5  // 5 pixel margin from edges
 
-// Touch state tracking
-bool touchState_UP = false;
-bool touchState_DOWN = false;
-bool touchState_LEFT = false;
-bool touchState_RIGHT = false;
-bool touchState_CENTER = false;
-
-// Track if keys are blocked after entering menu (require press+release before working)
-bool keysBlocked = false;
-
-// Track which specific keys were pressed when entering menu
-bool downPressedOnEnter = false;
-bool centerPressedOnEnter = false;
-
-// Track previous key states for edge detection
-bool prevTouchState_UP = false;
-bool prevTouchState_DOWN = false;
-bool prevTouchState_LEFT = false;
-bool prevTouchState_RIGHT = false;
-bool prevTouchState_CENTER = false;
-
-// Sprite dimensions (128x64 display)
-#define SPRITE_WIDTH 128
-#define SPRITE_HEIGHT 64
-
-// Animation timing (ms per frame)
-#define IDLE_FRAME_DELAY 300
-#define ALERT_FRAME_DELAY 150
-
 // System state (what mode the device is in)
-enum SystemState {
-    STATE_IDLE,     // Sprite animation running
-    STATE_MENU,     // Menu system active
-    STATE_ALERT     // Alert animation playing
-};
+// enum SystemState {
+//     STATE_IDLE,     // Sprite animation running
+//     STATE_MENU,     // Menu system active
+//     STATE_ALERT     // Alert animation playing
+// };
 
-SystemState currentState = STATE_IDLE;
+// enum AnimationState {
+//     ANIM_IDLE,
+//     ANIM_ALERT
+// };
 
-// Animation state (which animation to play)
-enum AnimationState {
-    ANIM_IDLE,
-    ANIM_ALERT
-};
-
-AnimationState animState = ANIM_IDLE;
-unsigned long lastFrameTime = 0;
-int currentFrame = 0;
+// Ensure the correct enums from DemiHandler.h are used throughout the file.
+extern SystemState currentState;
+extern AnimationState animState;
+extern unsigned long lastFrameTime;
+extern int currentFrame;
 
 // Number of frames per animation
 const int IDLE_FRAMES = 2;
@@ -158,137 +129,32 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 #define GLYPH_UP_HOLLOW      0x25b3   // △
 #define GLYPH_CENTER_HOLLOW  0x25cb   // ○
 
-// Function to get current sprite frame based on animation state
-const unsigned char* getCurrentSprite() {
-    if (animState == ANIM_IDLE) {
-        if (currentFrame == 0) return IDLE_1;
-        else return IDLE_2;
-    } else {
-        if (currentFrame == 0) return ALERT_1;
-        else if (currentFrame == 1) return ALERT_2;
-        else return ALERT_3;
-    }
-}
+// Touch state variables
+bool touchState_UP = false;
+bool prevTouchState_UP = false;
+bool touchState_DOWN = false;
+bool prevTouchState_DOWN = false;
+bool touchState_CENTER = false;
+bool prevTouchState_CENTER = false;
+bool touchState_LEFT = false;
+bool prevTouchState_LEFT = false;
+bool touchState_RIGHT = false;
+bool prevTouchState_RIGHT = false;
 
-// Function to get frame count for current animation
-int getFrameCount() {
-    return (animState == ANIM_IDLE) ? IDLE_FRAMES : ALERT_FRAMES;
-}
+// Flags for menu navigation
+bool keysBlocked = false;
+bool downPressedOnEnter = false;
+bool centerPressedOnEnter = false;
+bool blockTouchUntilRelease = false;
+unsigned long menuInputUnlockAt = 0;
 
-// Function to get frame delay for current animation
-int getFrameDelay() {
-    return (animState == ANIM_IDLE) ? IDLE_FRAME_DELAY : ALERT_FRAME_DELAY;
-}
 
-// Change system state
-void setState(SystemState newState) {
-    if (currentState != newState) {
-        currentState = newState;
-        
-        // Update LED color based on system state
-        if (newState == STATE_IDLE) {
-            animState = ANIM_IDLE;
-            neopixelWrite(RGB_LED_PIN, 0, 50, 0); // Green for idle
-        } else if (newState == STATE_MENU) {
-            neopixelWrite(RGB_LED_PIN, 0, 25, 50); // Cyan for menu
-            initMenu(); // Initialize menu when entering
-        } else if (newState == STATE_ALERT) {
-            animState = ANIM_ALERT;
-            neopixelWrite(RGB_LED_PIN, 50, 0, 0); // Red for alert
-        }
-        
-        // Reset animation frame
-        currentFrame = 0;
-        lastFrameTime = millis();
-    }
-}
 
 // Draw sprite centered on display
 void drawSprite(const unsigned char* sprite) {
     u8g2.clearBuffer();
     u8g2.drawBitmap(0, 0, SPRITE_WIDTH / 8, SPRITE_HEIGHT, sprite);
     u8g2.sendBuffer();
-}
-
-// Draw sprite with touch indicators overlay
-void drawSpriteWithIndicators(const unsigned char* sprite) {
-    u8g2.clearBuffer();
-    
-    // Draw sprite first
-    u8g2.drawBitmap(0, 0, SPRITE_WIDTH / 8, SPRITE_HEIGHT, sprite);
-    
-    // Draw touch indicator glyphs
-    u8g2.setFont(u8g2_font_cu12_t_symbols);
-
-    // Top Left: Left Triangle (GPIO 7 - LEFT)
-    if (touchState_LEFT) {
-        u8g2.drawGlyph(MARGIN, 17, GLYPH_LEFT_SOLID);
-    } else {
-        u8g2.drawGlyph(MARGIN, 17, GLYPH_LEFT_HOLLOW);
-    }
-
-    // Top Right: Right Triangle (GPIO 6 - RIGHT)
-    if (touchState_RIGHT) {
-        u8g2.drawGlyph(128 - MARGIN - 12, 17, GLYPH_RIGHT_SOLID);
-    } else {
-        u8g2.drawGlyph(128 - MARGIN - 12, 17, GLYPH_RIGHT_HOLLOW);
-    }
-
-    // Bottom Left: Down Triangle (GPIO 5 - DOWN)
-    if (touchState_DOWN) {
-        u8g2.drawGlyph(MARGIN, 59, GLYPH_DOWN_SOLID);
-    } else {
-        u8g2.drawGlyph(MARGIN, 59, GLYPH_DOWN_HOLLOW);
-    }
-
-    // Bottom Right: Up Triangle (GPIO 4 - UP)
-    if (touchState_UP) {
-        u8g2.drawGlyph(128 - MARGIN - 12, 59, GLYPH_UP_SOLID);
-    } else {
-        u8g2.drawGlyph(128 - MARGIN - 12, 59, GLYPH_UP_HOLLOW);
-    }
-
-    // Top Middle: Circle (GPIO 3 - CENTER)
-    if (touchState_CENTER) {
-        u8g2.drawGlyph(58, 17, GLYPH_CENTER_SOLID);
-    } else {
-        u8g2.drawGlyph(58, 17, GLYPH_CENTER_HOLLOW);
-    }
-
-    u8g2.sendBuffer();
-}
-
-// Check touch input and update state
-void checkTouch() {
-    // Read all touch pins
-    uint32_t touchVal_LEFT = touchRead(TOUCH_PIN_LEFT);
-    uint32_t touchVal_RIGHT = touchRead(TOUCH_PIN_RIGHT);
-    uint32_t touchVal_UP = touchRead(TOUCH_PIN_UP);
-    uint32_t touchVal_DOWN = touchRead(TOUCH_PIN_DOWN);
-    uint32_t touchVal_CENTER = touchRead(TOUCH_PIN_CENTER);
-
-    /*
-    // DEBUG: Log touch states before update
-    static int debugCounter = 0;
-    if (debugCounter++ % 10 == 0) {
-        Serial.print("[checkTouch] prev: D="); Serial.print(prevTouchState_DOWN);
-        Serial.print(" C="); Serial.println(prevTouchState_CENTER);
-    }
-    */
-   
-    // Store previous state for edge detection
-    prevTouchState_UP = touchState_UP;
-    prevTouchState_DOWN = touchState_DOWN;
-    prevTouchState_LEFT = touchState_LEFT;
-    prevTouchState_RIGHT = touchState_RIGHT;
-    prevTouchState_CENTER = touchState_CENTER;
-
-    // Update touch states
-    touchState_LEFT = (touchVal_LEFT > TOUCH_THRESHOLD);
-    touchState_RIGHT = (touchVal_RIGHT > TOUCH_THRESHOLD);
-    touchState_UP = (touchVal_UP > TOUCH_THRESHOLD);
-    touchState_DOWN = (touchVal_DOWN > TOUCH_THRESHOLD);
-    touchState_CENTER = (touchVal_CENTER > TOUCH_THRESHOLD);
 }
 
 // Check for edge transitions - just pressed (rising edge)
@@ -299,6 +165,10 @@ bool wasPressed(bool current, bool previous) {
 // Check for just released (falling edge)
 bool wasReleased(bool current, bool previous) {
     return !current && previous;
+}
+
+bool isAnyTouchPressed() {
+    return touchState_UP || touchState_DOWN || touchState_CENTER || touchState_LEFT || touchState_RIGHT;
 }
 
 
@@ -381,7 +251,7 @@ void initTouch() {
 
 void setup() {
     Serial.begin(115200);
-    esp_task_wdt_init(10, false);
+    esp_task_wdt_init(10, false); // Ensure watchdog timer initialization works
     delay(1000);
     Serial.println("--- Booting ESP32-S3 N16R8 ---");
     Serial.println("Initializing system...");
@@ -389,17 +259,14 @@ void setup() {
     // Initialize touch pins
     initTouch();
 
-    // 1. Force the S3 to use GPIO 8 and 9 for I2C
-    // WARNING: If the board hangs here, GPIO 8/9 are being used by Flash/PSRAM
+    // Initialize I2C and display
     Wire.setPins(OLED_SDA_PIN, OLED_SCL_PIN);
-    
     if (!Wire.begin()) {
         Serial.println("I2C Hardware Init Failed!");
         neopixelWrite(RGB_LED_PIN, 50, 0, 0); // Red for error
-        while(1);
+        while (1);
     }
 
-    // 2. Initialize U8g2
     if (u8g2.begin()) {
         Serial.println("U8g2 initialized successfully on 8/9");
         neopixelWrite(RGB_LED_PIN, 0, 50, 0); // Green for success
@@ -408,21 +275,27 @@ void setup() {
         neopixelWrite(RGB_LED_PIN, 50, 25, 0); // Orange for "Display not found"
     }
 
-    // 3. Set initial display settings
     u8g2.setContrast(255); // Maximum brightness
-    
-    // Initialize animation
-    lastFrameTime = millis();
     setState(STATE_IDLE);
+    drawSpriteWithStats(u8g2, getCurrentSprite());
+
+    Serial.println("Display initialized with sprite animation + stats");
+
+    // Create WiFi command queue for cross-core communication
+    wifiCommandQueue = xQueueCreate(10, sizeof(WifiCommand));
     
-    // Draw initial sprite
-    drawSpriteWithIndicators(getCurrentSprite());
-    
-    Serial.println("Display initialized with sprite animation + touch indicators");
-    Serial.println("Touch: Center=GPIO3, Up=GPIO4, Down=GPIO5, Left=GPIO6, Right=GPIO7");
-    Serial.println("Menu: Down + Center to enter, Center + Up (hold) to exit, Double-tap Left to go back");
-    
-    // Create main loop task pinned to Core 1
+    // WiFi task runs on Core 0 (separate from display/UI)
+    xTaskCreatePinnedToCore(
+        wifiHandlerTask,
+        "WiFiHandler",
+        WIFI_TASK_STACK_SIZE,
+        nullptr,
+        WIFI_TASK_PRIORITY,
+        nullptr,
+        WIFI_TASK_CORE
+    );
+    Serial.println("[Setup] WiFiHandler task created on Core 0");
+
     xTaskCreatePinnedToCore(
         mainLoopTask,
         "MainLoop",
@@ -436,77 +309,68 @@ void setup() {
 }
 
 void loop() {
-    // Main loop is now running on Core 1 via xTaskCreatePinnedToCore
-    // This keeps the Arduino main task alive
     delay(10);
 }
 
 // Main loop task pinned to Core 1
 void mainLoopTask(void* param) {
     Serial.println("[MainLoop] Running on Core 1");
-    
-    // Initialize TOTP
-    initTotp();
-    
-    // Auto-connect to preferred network
-    for (int i = 0; i < numSavedNetworks; i++) {
-        if (savedNetworks[i].autoConnect) {
-            Serial.print("[WiFi] Auto-connecting to: ");
-            Serial.println(savedNetworks[i].ssid);
-            WiFi.mode(WIFI_STA);
-            WiFi.begin(savedNetworks[i].ssid, savedNetworks[i].password);
-            break;
-        }
-    }
-    
+    SystemState previousState = currentState;
+
     while (true) {
-        unsigned long currentTime = millis();
-        
-        // Check touch input
-        checkTouch();
-        
-        if (currentState == STATE_IDLE || currentState == STATE_ALERT) {
-            if (currentState == STATE_IDLE && shouldEnterMenu()) {
-                Serial.println("shouldEnterMenu() = TRUE - entering menu!");
-                Serial.print("  touchState_DOWN = "); Serial.println(touchState_DOWN);
-                Serial.print("  touchState_CENTER = "); Serial.println(touchState_CENTER);
-                Serial.print("  prevTouchState_DOWN = "); Serial.println(prevTouchState_DOWN);
-                Serial.print("  prevTouchState_CENTER = "); Serial.println(prevTouchState_CENTER);
-                beepE5(80);  // Sound feedback
-                setState(STATE_MENU);
-                keysBlocked = true;
-                
-                // Record which keys were pressed when entering menu
-                downPressedOnEnter = touchState_DOWN;
-                centerPressedOnEnter = touchState_CENTER;
-                
-                Serial.print("  recorded: downPressedOnEnter="); Serial.println(downPressedOnEnter);
-                Serial.print("  recorded: centerPressedOnEnter="); Serial.println(centerPressedOnEnter);
+        // Save previous touch states
+        prevTouchState_UP = touchState_UP;
+        prevTouchState_DOWN = touchState_DOWN;
+        prevTouchState_CENTER = touchState_CENTER;
+        prevTouchState_LEFT = touchState_LEFT;
+        prevTouchState_RIGHT = touchState_RIGHT;
+
+        // Read current touch states
+        touchState_UP = touchRead(TOUCH_PIN_UP) > TOUCH_THRESHOLD;
+        touchState_DOWN = touchRead(TOUCH_PIN_DOWN) > TOUCH_THRESHOLD;
+        touchState_CENTER = touchRead(TOUCH_PIN_CENTER) > TOUCH_THRESHOLD;
+        touchState_LEFT = touchRead(TOUCH_PIN_LEFT) > TOUCH_THRESHOLD;
+        touchState_RIGHT = touchRead(TOUCH_PIN_RIGHT) > TOUCH_THRESHOLD;
+
+        if (currentState != previousState) {
+            blockTouchUntilRelease = true;
+            menuInputUnlockAt = millis() + 150;
+            previousState = currentState;
+        }
+
+        if (blockTouchUntilRelease) {
+            if (!isAnyTouchPressed() && millis() >= menuInputUnlockAt) {
+                blockTouchUntilRelease = false;
+                keysBlocked = false;
+                downPressedOnEnter = false;
+                centerPressedOnEnter = false;
             } else {
-                // Update animation frame
-                if (currentTime - lastFrameTime >= (unsigned long)getFrameDelay()) {
-                    lastFrameTime = currentTime;
-                    currentFrame++;
-                    if (currentFrame >= getFrameCount()) {
-                        currentFrame = 0;
-                    }
+                if (currentState == STATE_MENU) {
+                    renderMenu(u8g2);
+                } else {
+                    updateDemi(u8g2);
                 }
-                
-                // Draw sprite with touch indicators
-                drawSpriteWithIndicators(getCurrentSprite());
+                delay(5);
+                continue;
             }
-        } else if (currentState == STATE_MENU) {
-            // Handle menu input
+        }
+
+        // Check for menu enter combo (Down + Center)
+        if (currentState == STATE_IDLE && touchState_CENTER && touchState_DOWN) {
+            centerPressedOnEnter = true;
+            downPressedOnEnter = true;
+            keysBlocked = true;
+            beepC5(80);
+            setState(STATE_MENU);
+        }
+
+        if (currentState == STATE_MENU) {
             handleMenuInput();
+        } else {
+            updateDemi(u8g2);
         }
         
-        // Update TOTP in background
-        updateTotpInBackground();
-        
-        // Small delay to prevent busy-waiting
         delay(5);
-        
-        // Yield to allow other tasks to run
         yield();
     }
 }
