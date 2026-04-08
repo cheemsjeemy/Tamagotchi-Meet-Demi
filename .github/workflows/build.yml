@@ -1,0 +1,19 @@
+name: Build Firmware
+on: [push, workflow_dispatch] # Builds on every push or manual trigger
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: '3.9' }
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Run PlatformIO Build
+        run: pio run
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: .pio/build/**/firmware.bin

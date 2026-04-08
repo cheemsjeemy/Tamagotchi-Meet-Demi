@@ -32,11 +32,11 @@ static bool captivePortalRunning = false;
 // Start captive portal web server
 void startCaptivePortal() {
     if (captivePortalRunning) {
-        Serial0.println("[CaptivePortal] Web server already running");
+        Serial.println("[CaptivePortal] Web server already running");
         return;
     }
 
-    Serial0.println("[CaptivePortal] Starting web server...");
+    Serial.println("[CaptivePortal] Starting web server...");
 
     if (!captivePortalRoutesRegistered) {
         // Root page - WiFi configuration form
@@ -274,9 +274,9 @@ void startCaptivePortal() {
         }
         json += "]";
         
-        Serial0.print("[CaptivePortal] /networks returning ");
-        Serial0.print(numScanResults);
-        Serial0.println(" networks");
+        Serial.print("[CaptivePortal] /networks returning ");
+        Serial.print(numScanResults);
+        Serial.println(" networks");
         
         request->send(200, "application/json", json);
         });
@@ -287,8 +287,8 @@ void startCaptivePortal() {
             String ssid = request->getParam("ssid", true)->value();
             String password = request->getParam("password", true)->value();
             
-            Serial0.print("[CaptivePortal] Connecting to: ");
-            Serial0.println(ssid);
+            Serial.print("[CaptivePortal] Connecting to: ");
+            Serial.println(ssid);
             
             // Store credentials
             preferences.putString("wifi_ssid", ssid.c_str());
@@ -305,15 +305,15 @@ void startCaptivePortal() {
             int attempts = 0;
             while (WiFi.status() != WL_CONNECTED && attempts < 20) {
                 delay(500);
-                Serial0.print(".");
+                Serial.print(".");
                 attempts++;
             }
-            Serial0.println();
+            Serial.println();
             
             if (WiFi.status() == WL_CONNECTED) {
-                Serial0.println("[CaptivePortal] Connected!");
-                Serial0.print("  IP: ");
-                Serial0.println(WiFi.localIP());
+                Serial.println("[CaptivePortal] Connected!");
+                Serial.print("  IP: ");
+                Serial.println(WiFi.localIP());
 
                 // Save the network to menu with password
                 saveWifiNetwork(ssid.c_str(), password.c_str());
@@ -321,7 +321,7 @@ void startCaptivePortal() {
                 String response = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
                 request->send(200, "application/json", response);
             } else {
-                Serial0.println("[CaptivePortal] Connection failed!");
+                Serial.println("[CaptivePortal] Connection failed!");
                 request->send(200, "application/json", "{\"success\":false,\"message\":\"Failed to connect. Check password.\"}");
             }
         } else {
@@ -331,7 +331,7 @@ void startCaptivePortal() {
         
         // Trigger WiFi scan (runs on Core 0)
         captiveServer.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
-        Serial0.println("[CaptivePortal] /scan - triggering WiFi scan on Core 0");
+        Serial.println("[CaptivePortal] /scan - triggering WiFi scan on Core 0");
         
         // Set scanning flag
         isWifiScanning = true;
@@ -342,7 +342,7 @@ void startCaptivePortal() {
         // Run WiFi scan on Core 0
         xTaskCreatePinnedToCore(
             [](void* param) {
-                Serial0.println("    [CaptivePortal Scan] Starting scan...");
+                Serial.println("    [CaptivePortal Scan] Starting scan...");
                 int n = WiFi.scanNetworks();
                 
                 // Store results
@@ -355,9 +355,9 @@ void startCaptivePortal() {
                 }
                 
                 isWifiScanning = false;
-                Serial0.print("    [CaptivePortal Scan] Found ");
-                Serial0.print(numScanResults);
-                Serial0.println(" networks");
+                Serial.print("    [CaptivePortal Scan] Found ");
+                Serial.print(numScanResults);
+                Serial.println(" networks");
                 
                 // Send response
                 if (pendingRequest) {
@@ -387,7 +387,7 @@ void startCaptivePortal() {
     // Start server
     captiveServer.begin();
     captivePortalRunning = true;
-    Serial0.println("[CaptivePortal] Web server started on http://192.168.4.1");
+    Serial.println("[CaptivePortal] Web server started on http://192.168.4.1");
 }
 
 // Stop captive portal
@@ -395,7 +395,7 @@ void stopCaptivePortal() {
     if (!captivePortalRunning) {
         return;
     }
-    Serial0.println("[CaptivePortal] Stopping web server...");
+    Serial.println("[CaptivePortal] Stopping web server...");
     captiveServer.end();
     captivePortalRunning = false;
 }
