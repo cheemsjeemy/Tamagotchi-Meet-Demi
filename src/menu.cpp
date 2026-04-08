@@ -10,6 +10,7 @@
 #include <TOTP.h>
 #include <qrcode.h>
 #include <time.h>
+#include "miscellaneous/names.h"
 
 #include "WiFiHandler.h"
 
@@ -376,6 +377,7 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         time_t now = time(nullptr);
         if (now < 1000000000) { // Ensure time is synced
             Serial.println("[TOTP] Time not synced yet");
+            
             return;
         }
 
@@ -811,8 +813,10 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         if (err == ESP_OK && sta_list.num > 0) {
             for (int i = 0; i < sta_list.num && clientCount < MAX_CLIENTS; i++) {
                 wifi_sta_info_t sta = sta_list.sta[i];
-                sprintf(clientLabels[clientCount], "Player %d: %02X:%02X:%02X:%02X:%02X:%02X",
-                        clientCount + 1, sta.mac[0], sta.mac[1], sta.mac[2], sta.mac[3], sta.mac[4], sta.mac[5]);
+
+                String playerName = generate(sta.mac);
+
+                sprintf(clientLabels[clientCount], "P%d: %s", clientCount + 1, playerName.c_str());
                 menuClients[clientCount] = menuStatus(clientLabels[clientCount], nullptr);
                 menuClients[clientCount].parent = &menuConnectedDevicesList;
                 if (clientCount == 0) {
@@ -1454,13 +1458,32 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             }
 
             // Truncate if too long
-            if (strlen(pathBuf) > 16) {
-                char shortPath[20] = "../";
-                uint16_t len = strlen(pathBuf);
-                uint16_t startPos = (len > 14) ? (len - 14) : 0;
-                strncat(shortPath, &pathBuf[startPos], 13);
-                strncpy(pathBuf, shortPath, sizeof(pathBuf));
+            if (strlen(pathBuf) > 25) {
+                char *lastSlash = strrchr(pathBuf, '/'); // Find the file name
+                if (lastSlash != nullptr) {
+                    char *secondLastSlash = nullptr;
+                    // Look for the folder name before the file
+                    for (char *p = lastSlash - 1; p >= pathBuf; p--) {
+                        if (*p == '/') {
+                            secondLastSlash = p;
+                            break;
+                        }
+                    }
+
+                    char shortPath[30] = "../"; 
+                    if (secondLastSlash != nullptr) {
+                        // Found a parent folder! Result: ../Folder/File.h
+                        strncat(shortPath, secondLastSlash + 1, 21); 
+                    } else {
+                        // Only the file is deep. Result: ../File.h
+                        strncat(shortPath, lastSlash + 1, 21);
+                    }
+
+                    strncpy(pathBuf, shortPath, 25);
+                    pathBuf[25] = '\0'; // Force safety stop
+                }
             }
+
 
             u8g2.drawStr(0, 8, pathBuf);
             u8g2.drawLine(0, 12, 127, 12);

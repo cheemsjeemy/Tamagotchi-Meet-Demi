@@ -147,6 +147,8 @@ bool downPressedOnEnter = false;
 bool centerPressedOnEnter = false;
 bool blockTouchUntilRelease = false;
 unsigned long menuInputUnlockAt = 0;
+unsigned long systemBootTime = 0;
+#define MENU_ENTER_DELAY_MS 2000  // Wait 2 seconds before menu combo works
 
 
 
@@ -256,6 +258,9 @@ void setup() {
     Serial.println("--- Booting ESP32-S3 N16R8 ---");
     Serial.println("Initializing system...");
 
+    // Initialize boot time for menu enter delay
+    systemBootTime = millis();
+
     // Initialize touch pins
     initTouch();
 
@@ -355,13 +360,15 @@ void mainLoopTask(void* param) {
             }
         }
 
-        // Check for menu enter combo (Down + Center)
+        // Check for menu enter combo (Down + Center) - with delay after boot
         if (currentState == STATE_IDLE && touchState_CENTER && touchState_DOWN) {
-            centerPressedOnEnter = true;
-            downPressedOnEnter = true;
-            keysBlocked = true;
-            beepC5(80);
-            setState(STATE_MENU);
+            if (millis() - systemBootTime >= MENU_ENTER_DELAY_MS) {
+                centerPressedOnEnter = true;
+                downPressedOnEnter = true;
+                keysBlocked = true;
+                beepC5(80);
+                setState(STATE_MENU);
+            }
         }
 
         if (currentState == STATE_MENU) {

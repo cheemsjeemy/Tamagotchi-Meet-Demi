@@ -1,11 +1,12 @@
 #include "WiFiHandler.h"
-
 #include <Preferences.h>
 #include <time.h>
 
 static const long GMT_OFFSET_SEC = 28800;
 static const int DAYLIGHT_OFFSET_SEC = 0;
 static const char* PREF_NAMESPACE = "demi settings";
+
+extern void startCaptivePortal();
 
 QueueHandle_t wifiCommandQueue = nullptr;
 
@@ -516,6 +517,7 @@ void initWifiHandler() {
         wifiStatus.state = WIFI_STATE_AP_MODE;
         updateStatusString("AP Mode");
         actualStartScan(true);
+        startCaptivePortal();
     }
 
     Serial.println("[WiFiHandler] Initialization complete");
