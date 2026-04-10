@@ -5,23 +5,24 @@
 #include <vector>
 #include <map>
 
-// 1. Define the "Package" for your song data
-struct Song {
-    int bpm;
-    std::vector<int> notes;
+struct Note {
+    int pitch;      // MIDI note number (0-127). 0 = rest/silence
+    float duration; // Beat fraction (1.0 = quarter note, 0.5 = eighth)
 };
 
-// 2. Create the Map (The Catalog)
-// Key = Song Title, Value = The Song Package
+struct Song {
+    int bpm;
+    std::vector<Note> notes;
+};
+
 inline const std::map<std::string, Song> song_library = {
-    {
-        "TheApple_Code", 
-        {120, {60, 62, 64, 67}} // BPM is 120, Notes follow
-    },
-    {
-        "Neon_Drive", 
-        {145, {72, 70, 72, 75}} // BPM is 145
-    }
+    {"ABC Song", {120, {
+        {65, 1.0}, {0, 1.0}, {67, 1.0}, {0, 1.0},
+        {65, 2.0}, {0, 2.0}
+    }}},
+    {"TheApple_Code", {120, {
+        {60, 2.0}, {62, 1.0}, {64, 2.0}, {67, 3.0}
+    }}}
 };
 
 #endif

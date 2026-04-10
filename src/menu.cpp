@@ -169,7 +169,13 @@ MenuItem menuFeed      = menuFolder("Feed");
 
 // Play submenu
 MenuItem menuPetting  = menuAction("Petting", cbPetting);
-MenuItem menuJumping  = menuAction("Jumping", cbJumping);
+MenuItem menuJumping = menuAction("Jumping", cbJumping);
+MenuItem menuSing     = menuFolder("Sing");
+
+// Sing submenu - songs from MusicMenu.h
+MenuItem menuABCSong    = menuAction("ABC Song", nullptr);
+MenuItem menuTheApple   = menuAction("The Apple Code", nullptr);
+MenuItem menuNeonDrive  = menuAction("Neon Drive", nullptr);
 
 // Feed -> Fridge submenu (food items)
 MenuItem menuFridge     = menuFolder("Fridge");
@@ -566,13 +572,27 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         menuSleep.parent = &menuDemi;
         menuSleep.nextSibling = nullptr;
 
-        // Play children: Petting -> Jumping
+        // Play children: Petting -> Jumping -> Sing
         menuPlay.firstChild = &menuPetting;
         menuPetting.parent = &menuPlay;
         menuPetting.nextSibling = &menuJumping;
         menuJumping.prevSibling = &menuPetting;
         menuJumping.parent = &menuPlay;
-        menuJumping.nextSibling = nullptr;
+        menuJumping.nextSibling = &menuSing;
+        menuSing.prevSibling = &menuJumping;
+        menuSing.parent = &menuPlay;
+        menuSing.nextSibling = nullptr;
+
+        // Sing children: ABC Song -> The Apple Code -> Neon Drive
+        menuSing.firstChild = &menuABCSong;
+        menuABCSong.parent = &menuSing;
+        menuABCSong.nextSibling = &menuTheApple;
+        menuTheApple.prevSibling = &menuABCSong;
+        menuTheApple.parent = &menuSing;
+        menuTheApple.nextSibling = &menuNeonDrive;
+        menuNeonDrive.prevSibling = &menuTheApple;
+        menuNeonDrive.parent = &menuSing;
+        menuNeonDrive.nextSibling = nullptr;
 
         // Feed -> Fridge children: Fridge
         menuFeed.firstChild = &menuFridge;

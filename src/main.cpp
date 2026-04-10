@@ -9,6 +9,9 @@
 #include "sprite_alert.h"
 #include <esp_task_wdt.h>
 #include "WiFiHandler.h"
+#include "esp_partition.h"
+#include <SPIFFS.h>
+
 
 // NTP constants
 static const long gmtOffset_sec = 28800;
@@ -251,6 +254,79 @@ void initTouch() {
     Serial.println("Touch pins initialized: GPIO 3=Center, 4=Up, 5=Down, 6=Left, 7=Right");
 }
 
+
+
+#include <SPIFFS.h>
+#include "esp_partition.h"
+
+void printHealthStatus() {
+    // 1. RAM Calculation
+    uint32_t totalInt = ESP.getHeapSize();
+    uint32_t freeInt = ESP.getFreeHeap();
+    uint32_t usedInt = totalInt - freeInt;
+
+    // 2. PSRAM Calculation
+    uint32_t totalPsram = ESP.getPsramSize();
+    uint32_t freePsram = ESP.getFreePsram();
+    uint32_t usedPsram = totalPsram - freePsram;
+
+    Serial.println("\n--- LIVE MEMORY USAGE ---");
+
+    Serial.println("[INTERNAL RAM]");
+    Serial.printf("  USED: %6.2f KB | FREE: %6.2f KB | TOTAL: %.2f KB (%.1f%% Used)\n", 
+        usedInt/1024.0, freeInt/1024.0, totalInt/1024.0, ((float)usedInt/totalInt)*100);
+
+    Serial.println("\n[PSRAM (8MB R8)]");
+    if (totalPsram > 0) {
+        Serial.printf("  USED: %6.2f MB | FREE: %6.2f MB | TOTAL: %.2f MB (%.1f%% Used)\n", 
+            usedPsram/(1024.0*1024.0), freePsram/(1024.0*1024.0), totalPsram/(1024.0*1024.0), ((float)usedPsram/totalPsram)*100);
+    } else {
+        Serial.println("  PSRAM not enabled!");
+    }
+
+    Serial.println("\n[FLASH PARTITION DETAILED USAGE (N16)]");
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    while (it != NULL) {
+        const esp_partition_t *p = esp_partition_get(it);
+        float pSizeKB = p->size / 1024.0;
+        float pSizeMB = p->size / (1024.0 * 1024.0);
+        float pUsedKB = 0, pUsedMB = 0, pPerc = 0;
+
+        // Logic to find "Used" based on room type
+        if (String(p->label) == "app0") {
+            pUsedKB = ESP.getSketchSize() / 1024.0;
+            pUsedMB = pUsedKB / 1024.0;
+            pPerc = (pUsedKB / pSizeKB) * 100;
+        } 
+        else if (String(p->label) == "spiffs") {
+            if (SPIFFS.begin(true)) {
+                pUsedKB = SPIFFS.usedBytes() / 1024.0;
+                pUsedMB = pUsedKB / 1024.0;
+                pPerc = (pUsedKB / pSizeKB) * 100;
+            }
+        }
+        // app1, otadata, and nvs are system managed; showing as "Reserved/System"
+        
+        Serial.printf("  Room: %-10s | USED: %7.2f KB (%4.2f MB) | TOTAL: %7.2f KB (%4.2f MB) | %5.2f%%\n", 
+            p->label, pUsedKB, pUsedMB, pSizeKB, pSizeMB, pPerc);
+            
+        it = esp_partition_next(it);
+    }
+    esp_partition_iterator_release(it);
+
+    Serial.println("\n[SYSTEM SUMMARY]");
+    Serial.printf("  Physical Chip Total: %.2f MB\n", ESP.getFlashChipSize()/(1024.0*1024.0));
+    Serial.printf("  Internal Chip Temp:  %.2f °C\n", temperatureRead());
+    Serial.printf("CPU FREQUENCY: %d MHz\n", getCpuFrequencyMhz());
+    Serial.printf("SDK Version: %s\n", ESP.getSdkVersion());
+
+    Serial.println("\n--- END OF HEALTH REPORT ---");
+
+}
+
+
+
+
 void setup() {
     Serial.begin(115200);
     esp_task_wdt_init(10, false); // Ensure watchdog timer initialization works
@@ -311,6 +387,16 @@ void setup() {
         1  // Core 1
     );
     Serial.println("[Setup] Main loop task created on Core 1");
+
+
+    delay(5000);
+     Serial.println("--- [ ESP32 HEALTH REPORT ] --- \n");
+     printHealthStatus();   
+    
+    Serial.println("\n-------- [END OF SETUP()] --------\n");
+
+     Serial.println("----------------------------------------");
+
 }
 
 void loop() {

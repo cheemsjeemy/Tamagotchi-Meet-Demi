@@ -182,7 +182,16 @@ static void handleConnectionStatus() {
 
         snprintf(wifiStatus.statusString, sizeof(wifiStatus.statusString), "Connected");
         Serial.printf("[WiFiHandler] Connected to: %s\n", wifiStatus.currentSsid);
+
+        // Trigger immediate NTP sync on connect
+        configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "time.google.com", "time.cloudflare.com", "pool.ntp.org");
+        ntpSyncInProgress = true;
+        lastNtpAttempt = millis();
+        Serial.println("[WiFiHandler] NTP sync triggered on connect");
+
+
         return;
+
     }
 
     if (elapsed < WIFI_CONNECT_TIMEOUT_MS &&
@@ -457,6 +466,7 @@ static void processCommand(const WifiCommand& cmd) {
             strncpy(wifiStatus.pendingPassword, cmd.password, sizeof(wifiStatus.pendingPassword) - 1);
             updateStatusString("Connecting...");
             Serial.printf("[WiFiHandler] Connecting to: %s\n", cmd.ssid);
+            
             break;
 
         case WIFI_CMD_DISCONNECT:
