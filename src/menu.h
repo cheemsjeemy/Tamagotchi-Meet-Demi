@@ -11,13 +11,14 @@
 // External U8G2 display instance (defined in main.cpp)
 extern U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2;
 
-// Touch pin definitions (must match main.cpp)
-#define MENU_TOUCH_PIN_UP 4
-#define MENU_TOUCH_PIN_DOWN 5
-#define MENU_TOUCH_PIN_LEFT 7
-#define MENU_TOUCH_PIN_RIGHT 6
-#define MENU_TOUCH_PIN_CENTER 3
-#define MENU_TOUCH_THRESHOLD 50000
+// Button pin definitions (must match main.cpp)
+#define BTN_UP 9
+#define BTN_DOWN 6
+#define BTN_LEFT 10
+#define BTN_RIGHT 5
+#define BTN_CENTER 7
+#define BTN_LB 11
+#define BTN_RB 4
 
 // Menu item types
 enum MenuItemType {

@@ -1,0 +1,26 @@
+#include <Arduino.h>
+
+// Skipping the noisy center pins (15, 16, 17, 18, 8, 46)
+int pins[] = {4, 5, 6, 7, 9, 10, 11};
+const char* labels[] = {"B1 (GP4)", "B2 (GP5)", "B3 (GP6)", "B4 (GP7)", "B5 (GP9)", "B6 (GP10)", "B7 (GP11)"};
+
+
+void setup() {
+  Serial.begin(115200);
+  
+  for (int i = 0; i < 7; i++) {
+    pinMode(pins[i], INPUT_PULLUP);
+  }
+  
+  Serial.println("Left-side Quiet Zone active. (Skipping 15-18)");
+}
+
+void loop() {
+  for (int i = 0; i < 7; i++) {
+    if (digitalRead(pins[i]) == LOW) {
+      Serial.print(labels[i]);
+      Serial.println(" -> PRESSED");
+      delay(200); // Prevents double-triggering
+    }
+  }
+}

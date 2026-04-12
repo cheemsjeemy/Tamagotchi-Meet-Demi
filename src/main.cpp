@@ -11,7 +11,9 @@
 #include "WiFiHandler.h"
 #include "esp_partition.h"
 #include <SPIFFS.h>
+#include "miscellaneous/commands.h"
 
+bool _TestingController = true; 
 
 // NTP constants
 static const long gmtOffset_sec = 28800;
@@ -25,13 +27,14 @@ void mainLoopTask(void* param);
 #define OLED_SCL_PIN 9
 #define RGB_LED_PIN 48 // Onboard LED for status
 
-// Touch pins
-#define TOUCH_PIN_CENTER 3
-#define TOUCH_PIN_UP 4
-#define TOUCH_PIN_DOWN 5
-#define TOUCH_PIN_LEFT 7
-#define TOUCH_PIN_RIGHT 6
-#define TOUCH_THRESHOLD 50000  // Threshold for touch detection (S3 logic: higher value = touch)
+// Physical button pins
+#define BTN_RB 4
+#define BTN_RIGHT 5
+#define BTN_DOWN 6
+#define BTN_CENTER 7
+#define BTN_UP 9
+#define BTN_LEFT 10
+#define BTN_LB 11
 
 // Buzzer pin
 #define BUZZER_PIN 40
@@ -132,17 +135,76 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 #define GLYPH_UP_HOLLOW      0x25b3   // △
 #define GLYPH_CENTER_HOLLOW  0x25cb   // ○
 
-// Touch state variables
-bool touchState_UP = false;
-bool prevTouchState_UP = false;
-bool touchState_DOWN = false;
-bool prevTouchState_DOWN = false;
-bool touchState_CENTER = false;
-bool prevTouchState_CENTER = false;
-bool touchState_LEFT = false;
-bool prevTouchState_LEFT = false;
-bool touchState_RIGHT = false;
-bool prevTouchState_RIGHT = false;
+// Button state variables
+bool btnState_UP = false;
+bool prevBtnState_UP = false;
+bool btnState_DOWN = false;
+bool prevBtnState_DOWN = false;
+bool btnState_CENTER = false;
+bool prevBtnState_CENTER = false;
+bool btnState_LEFT = false;
+bool prevBtnState_LEFT = false;
+bool btnState_RIGHT = false;
+bool prevBtnState_RIGHT = false;
+bool btnState_LB = false;
+bool prevBtnState_LB = false;
+bool btnState_RB = false;
+bool prevBtnState_RB = false;
+
+// Button handler struct
+struct Button {
+    uint8_t pin;
+    bool* state;
+    bool* prevState;
+    bool rawState;
+    unsigned long lastChange;
+    bool wasPressed;
+    bool wasReleased;
+};
+
+Button buttons[] = {
+    {BTN_UP, &btnState_UP, &prevBtnState_UP, false, 0, false, false},
+    {BTN_DOWN, &btnState_DOWN, &prevBtnState_DOWN, false, 0, false, false},
+    {BTN_CENTER, &btnState_CENTER, &prevBtnState_CENTER, false, 0, false, false},
+    {BTN_LEFT, &btnState_LEFT, &prevBtnState_LEFT, false, 0, false, false},
+    {BTN_RIGHT, &btnState_RIGHT, &prevBtnState_RIGHT, false, 0, false, false},
+    {BTN_LB, &btnState_LB, &prevBtnState_LB, false, 0, false, false},
+    {BTN_RB, &btnState_RB, &prevBtnState_RB, false, 0, false, false},
+};
+
+const unsigned long DEBOUNCE_MS = 30;
+
+void updateButton(Button& btn) {
+    bool reading = digitalRead(btn.pin) == LOW;
+    
+    if (reading != *btn.state) {
+        bool prev = *btn.state;
+        *btn.state = reading;
+        
+        btn.wasPressed = reading && !prev;
+        btn.wasReleased = !reading && prev;
+    }
+}
+
+void handleAllButtons() {
+    for (auto& btn : buttons) {
+        updateButton(btn);
+    }
+    
+    // Crosstalk filter: if DOWN and CENTER pressed together, ignore both (crosstalk)
+    bool downPressed = btnState_DOWN;
+    bool centerPressed = btnState_CENTER;
+    
+    if (downPressed && centerPressed) {
+        Serial.println("CROSSTALK DETECTED");
+        for (auto& btn : buttons) {
+            if (btn.pin == BTN_CENTER || btn.pin == BTN_DOWN) {
+                btn.wasPressed = false;
+                btn.wasReleased = false;
+            }
+        }
+    }
+}
 
 // Flags for menu navigation
 bool keysBlocked = false;
@@ -172,8 +234,8 @@ bool wasReleased(bool current, bool previous) {
     return !current && previous;
 }
 
-bool isAnyTouchPressed() {
-    return touchState_UP || touchState_DOWN || touchState_CENTER || touchState_LEFT || touchState_RIGHT;
+bool isAnyButtonPressed() {
+    return btnState_UP || btnState_DOWN || btnState_CENTER || btnState_LEFT || btnState_RIGHT || btnState_LB || btnState_RB;
 }
 
 
@@ -193,8 +255,17 @@ void handleMenuInput() {
         return;
     }
     
-    // UP - select previous item (on release)
-    if (wasReleased(touchState_UP, prevTouchState_UP)) {
+    // Check for RB = Back button
+    if (wasReleased(btnState_RB, prevBtnState_RB)) {
+        if (!keysBlocked) {
+            menuGoBack();
+        } else {
+            keysBlocked = false;
+        }
+    }
+    
+    // UP - Page Up (fast scroll up)
+    if (wasReleased(btnState_UP, prevBtnState_UP)) {
         if (!keysBlocked) {
             menuSelectPrev();
         } else {
@@ -202,8 +273,8 @@ void handleMenuInput() {
         }
     }
     
-    // DOWN - select next item (on release) - but ignore if it was part of the combo that entered menu
-    if (wasReleased(touchState_DOWN, prevTouchState_DOWN)) {
+    // DOWN - Page Down (fast scroll down)
+    if (wasReleased(btnState_DOWN, prevBtnState_DOWN)) {
         if (downPressedOnEnter) {
             downPressedOnEnter = false;
         } else if (!keysBlocked) {
@@ -214,10 +285,9 @@ void handleMenuInput() {
     }
     
     // CENTER - enter/select (on release) - but ignore if it was part of the combo that entered menu
-    if (wasReleased(touchState_CENTER, prevTouchState_CENTER)) {
-        // If Center was pressed as part of the Down+Center combo, ignore its first release
+    if (wasReleased(btnState_CENTER, prevBtnState_CENTER)) {
+        // If Center was pressed as part of the enter combo, ignore its first release
         if (centerPressedOnEnter) {
-            // Center was part of the enter combo - clear the flag and ignore this release
             centerPressedOnEnter = false;
             Serial.println("CENTER released (was part of enter combo - ignored)");
         } else if (!keysBlocked) {
@@ -227,8 +297,8 @@ void handleMenuInput() {
         }
     }
     
-    // LEFT - decrease value (on release)
-    if (wasReleased(touchState_LEFT, prevTouchState_LEFT)) {
+    // LEFT - slider decrease (on release)
+    if (wasReleased(btnState_LEFT, prevBtnState_LEFT)) {
         if (!keysBlocked) {
             menuAdjustValue(-1);
         } else {
@@ -236,8 +306,8 @@ void handleMenuInput() {
         }
     }
     
-    // RIGHT - increase value (on release)
-    if (wasReleased(touchState_RIGHT, prevTouchState_RIGHT)) {
+    // RIGHT - slider increase (on release)
+    if (wasReleased(btnState_RIGHT, prevBtnState_RIGHT)) {
         if (!keysBlocked) {
             menuAdjustValue(+1);
         } else {
@@ -249,15 +319,19 @@ void handleMenuInput() {
     renderMenu(u8g2);
 }
 
-// Initialize touch pins
-void initTouch() {
-    Serial.println("Touch pins initialized: GPIO 3=Center, 4=Up, 5=Down, 6=Left, 7=Right");
+// Initialize button pins
+void initButtons() {
+    pinMode(BTN_RB, INPUT_PULLUP);
+    pinMode(BTN_RIGHT, INPUT_PULLUP);
+    pinMode(BTN_DOWN, INPUT_PULLUP);
+    pinMode(BTN_CENTER, INPUT_PULLUP);
+    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_LEFT, INPUT_PULLUP);
+    pinMode(BTN_LB, INPUT_PULLUP);
+    Serial.println("Buttons initialized: GPIO 4=RB, 5=Right, 6=Down, 7=Center, 15=Up, 16=Left, 17=LB");
 }
 
 
-
-#include <SPIFFS.h>
-#include "esp_partition.h"
 
 void printHealthStatus() {
     // 1. RAM Calculation
@@ -337,8 +411,8 @@ void setup() {
     // Initialize boot time for menu enter delay
     systemBootTime = millis();
 
-    // Initialize touch pins
-    initTouch();
+    // Initialize button pins
+    initButtons();
 
     // Initialize I2C and display
     Wire.setPins(OLED_SDA_PIN, OLED_SCL_PIN);
@@ -399,29 +473,62 @@ void setup() {
 
 }
 
-void loop() {
-    delay(10);
-}
 
+
+void loop() {
+    // Check if you typed something in the Serial Monitor
+   if (Serial.available() > 0) {
+        String input = Serial.readStringUntil('\n');
+        input.trim();
+
+        if (input.length() > 0) {
+            bool found = false;
+            for (int i = 0; i < cmdCount; i++) {
+                // Check primary name OR check alias
+                if (input == commandTable[i].name || 
+                   (strlen(commandTable[i].alias) > 0 && input == commandTable[i].alias)) {
+                    
+                    commandTable[i].action();
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) Serial.println("Invalid command. Type 'h' for help.");
+        }
+}
+}
 // Main loop task pinned to Core 1
 void mainLoopTask(void* param) {
     Serial.println("[MainLoop] Running on Core 1");
     SystemState previousState = currentState;
 
     while (true) {
-        // Save previous touch states
-        prevTouchState_UP = touchState_UP;
-        prevTouchState_DOWN = touchState_DOWN;
-        prevTouchState_CENTER = touchState_CENTER;
-        prevTouchState_LEFT = touchState_LEFT;
-        prevTouchState_RIGHT = touchState_RIGHT;
+        // Capture previous states before updating
+        prevBtnState_UP = btnState_UP;
+        prevBtnState_DOWN = btnState_DOWN;
+        prevBtnState_CENTER = btnState_CENTER;
+        prevBtnState_LEFT = btnState_LEFT;
+        prevBtnState_RIGHT = btnState_RIGHT;
+        prevBtnState_LB = btnState_LB;
+        prevBtnState_RB = btnState_RB;
 
-        // Read current touch states
-        touchState_UP = touchRead(TOUCH_PIN_UP) > TOUCH_THRESHOLD;
-        touchState_DOWN = touchRead(TOUCH_PIN_DOWN) > TOUCH_THRESHOLD;
-        touchState_CENTER = touchRead(TOUCH_PIN_CENTER) > TOUCH_THRESHOLD;
-        touchState_LEFT = touchRead(TOUCH_PIN_LEFT) > TOUCH_THRESHOLD;
-        touchState_RIGHT = touchRead(TOUCH_PIN_RIGHT) > TOUCH_THRESHOLD;
+        // Update all buttons with debouncing
+        handleAllButtons();
+
+        // Controller testing - print button presses to serial
+        if (_TestingController) {
+            for (auto& btn : buttons) {
+                if (btn.wasPressed) {
+                    if (btn.pin == BTN_UP) Serial.println("BTN: UP");
+                    else if (btn.pin == BTN_DOWN) Serial.println("BTN: DOWN");
+                    else if (btn.pin == BTN_LEFT) Serial.println("BTN: LEFT");
+                    else if (btn.pin == BTN_RIGHT) Serial.println("BTN: RIGHT");
+                    else if (btn.pin == BTN_CENTER) Serial.println("BTN: CENTER");
+                    else if (btn.pin == BTN_LB) Serial.println("BTN: LB");
+                    else if (btn.pin == BTN_RB) Serial.println("BTN: RB");
+                }
+            }
+        }
 
         if (currentState != previousState) {
             blockTouchUntilRelease = true;
@@ -430,7 +537,7 @@ void mainLoopTask(void* param) {
         }
 
         if (blockTouchUntilRelease) {
-            if (!isAnyTouchPressed() && millis() >= menuInputUnlockAt) {
+            if (!isAnyButtonPressed() && millis() >= menuInputUnlockAt) {
                 blockTouchUntilRelease = false;
                 keysBlocked = false;
                 downPressedOnEnter = false;
@@ -446,11 +553,9 @@ void mainLoopTask(void* param) {
             }
         }
 
-        // Check for menu enter combo (Down + Center) - with delay after boot
-        if (currentState == STATE_IDLE && touchState_CENTER && touchState_DOWN) {
+        // Check for menu enter (RB button) - with delay after boot
+        if (currentState == STATE_IDLE && btnState_RB) {
             if (millis() - systemBootTime >= MENU_ENTER_DELAY_MS) {
-                centerPressedOnEnter = true;
-                downPressedOnEnter = true;
                 keysBlocked = true;
                 beepC5(80);
                 setState(STATE_MENU);

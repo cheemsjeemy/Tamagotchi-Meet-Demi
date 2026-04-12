@@ -539,19 +539,42 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         // Link root items together as siblings
         menuSettings.nextSibling = &menuDemi;
         menuDemi.prevSibling = &menuSettings;
-        menuDemi.nextSibling = &menuWifi;
-        menuWifi.prevSibling = &menuDemi;
-        menuWifi.nextSibling = &menuBluetooth;
-        menuBluetooth.prevSibling = &menuWifi;
-        menuBluetooth.nextSibling = &menuMSAuth;
-        menuMSAuth.prevSibling = &menuBluetooth;
+        menuDemi.nextSibling = &menuMSAuth;
+        menuMSAuth.prevSibling = &menuDemi;
         menuMSAuth.nextSibling = &menuPayloads;
         menuPayloads.prevSibling = &menuMSAuth;
         menuPayloads.nextSibling = nullptr;
 
-        // Settings children: Brightness -> About -> Save Settings
-        menuSettings.firstChild = &menuBrightness;
+        // Settings children: WiFi -> Bluetooth -> Brightness -> About -> Save Settings
+        menuSettings.firstChild = &menuWifi;
+
+        // WiFi
+        menuWifi.parent = &menuSettings;
+        menuWifi.prevSibling = nullptr;  // first child
+        menuWifi.nextSibling = &menuBluetooth;
+
+        // Bluetooth
+        menuBluetooth.parent = &menuSettings;
+        menuBluetooth.prevSibling = &menuWifi;
+        menuBluetooth.nextSibling = &menuBrightness;
+
+        // Bluetooth children: Enabled -> Device Name -> Test BT
+        menuBluetooth.firstChild = &menuBtEnabled;
+        menuBtEnabled.parent = &menuBluetooth;
+        menuBtEnabled.prevSibling = nullptr;
+        menuBtEnabled.nextSibling = &menuBtName;
+
+        menuBtName.parent = &menuBluetooth;
+        menuBtName.prevSibling = &menuBtEnabled;
+        menuBtName.nextSibling = &menuBtTest;
+
+        menuBtTest.parent = &menuBluetooth;
+        menuBtTest.prevSibling = &menuBtName;
+        menuBtTest.nextSibling = nullptr;
+
+        // Brightness
         menuBrightness.parent = &menuSettings;
+        menuBrightness.prevSibling = &menuBluetooth;
         menuBrightness.nextSibling = &menuAbout;
         menuAbout.prevSibling = &menuBrightness;
         menuAbout.nextSibling = &menuSaveSettings;
@@ -1220,26 +1243,16 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
     // ============================================
 
     bool isKeyPressed(uint8_t pin) {
-        uint32_t val = touchRead(pin);
-        return (val > MENU_TOUCH_THRESHOLD);
+        return digitalRead(pin) == LOW;
     }
 
     bool shouldEnterMenu() {
-        return isKeyPressed(MENU_TOUCH_PIN_DOWN) && isKeyPressed(MENU_TOUCH_PIN_CENTER);
+        return false;
     }
 
     bool shouldExitMenu() {
-        static unsigned long holdStart = 0;
-
-        if (isKeyPressed(MENU_TOUCH_PIN_CENTER) && isKeyPressed(MENU_TOUCH_PIN_UP)) {
-            if (holdStart == 0) {
-                holdStart = millis();
-            } else if (millis() - holdStart >= 500) {
-                holdStart = 0;
-                return true;
-            }
-        } else {
-            holdStart = 0;
+        if (isKeyPressed(BTN_LB) && isKeyPressed(BTN_RB)) {
+            return true;
         }
         return false;
     }
@@ -1248,7 +1261,7 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         static unsigned long lastLeftPress = 0;
         static bool leftWasPressed = false;
 
-        bool leftPressed = isKeyPressed(MENU_TOUCH_PIN_LEFT);
+        bool leftPressed = isKeyPressed(BTN_LEFT);
         unsigned long now = millis();
 
         if (leftWasPressed && !leftPressed) {
