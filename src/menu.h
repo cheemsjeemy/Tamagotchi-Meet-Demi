@@ -12,12 +12,12 @@
 extern U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2;
 
 // Button pin definitions (must match main.cpp)
-#define BTN_UP 9
+#define BTN_UP 10
 #define BTN_DOWN 6
-#define BTN_LEFT 10
+#define BTN_LEFT 11
 #define BTN_RIGHT 5
 #define BTN_CENTER 7
-#define BTN_LB 11
+#define BTN_LB 12
 #define BTN_RB 4
 
 // Menu item types
@@ -208,6 +208,8 @@ struct MenuState {
     uint8_t editCursorPos;      // Cursor position for input editing
     bool justEntered;           // True right after entering menu (blocks immediate Center)
     bool showQRCode;            // True if displaying QR code screen
+    uint8_t horizontalIndex;   // Current icon index (0-3 for root items)
+    bool isHorizontalMenu;     // true = root level (horizontal), false = submenu (vertical)
 };
 
 // Global menu state
@@ -227,6 +229,13 @@ extern bool isWifiScanning;
 extern bool isAutoConnectScan;
 extern bool noSavedNetworksInRange;
 
+// Root menu items for horizontal navigation
+extern MenuItem menuSettings;
+extern MenuItem menuDemi;
+extern MenuItem menuMicrosoft;
+extern MenuItem menuPayloads;
+extern MenuState menuState;
+
 // Initialize menu system
 void initMenu();
 void updateTotpInBackground();
@@ -244,6 +253,7 @@ void beepE5(uint16_t durationMs);
 void beepC5(uint16_t durationMs);
 void beepCSharp(uint16_t durationMs);
 void beepLowC(uint16_t durationMs);
+void beepB4(uint16_t durationMs);
 
 // Initialize preferences (load saved settings)
 void initPreferences();

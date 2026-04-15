@@ -24,6 +24,7 @@ int numSavedNetworks = 0;
 int selectedNetworkIndex = -1;
 bool isInScannedNetwork = false;
 bool isInSavedNetwork = false;
+bool scaryNetworkFound = false;
 
 static bool ntpSyncInProgress = false;
 static unsigned long lastNtpAttempt = 0;
@@ -435,6 +436,28 @@ static void handleScanComplete() {
 
     for (int i = numScanResults; i < MAX_WIFI_SCAN_RESULTS; ++i) {
         memset(&scanResults[i], 0, sizeof(scanResults[i]));
+    }
+
+    // Check for scary networks (hidden SSIDs, strange names)
+    scaryNetworkFound = false;
+    for (int i = 0; i < numScanResults; ++i) {
+        // Hidden networks = spooky
+        if (strlen(scanResults[i].ssid) == 0) {
+            scaryNetworkFound = true;
+            Serial.println("[WiFiHandler] ⚠️  Hidden network detected! Demi is spooked...");
+            break;
+        }
+        
+        // Generic "unknown" or "scary" network names
+        const char* scaryNames[] = {"unknown", "hidden", "virus", "hack", "ghost", "evil", "demon", "spooky", NULL};
+        for (int j = 0; scaryNames[j] != NULL; j++) {
+            if (strcasestr(scanResults[i].ssid, scaryNames[j]) != NULL) {
+                scaryNetworkFound = true;
+                Serial.printf("[WiFiHandler] ⚠️  Spooky network detected: '%s'! Demi is scared!\n", scanResults[i].ssid);
+                break;
+            }
+        }
+        if (scaryNetworkFound) break;
     }
 
     WiFi.scanDelete();

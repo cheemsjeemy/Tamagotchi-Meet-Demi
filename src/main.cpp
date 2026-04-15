@@ -12,8 +12,12 @@
 #include "esp_partition.h"
 #include <SPIFFS.h>
 #include "miscellaneous/commands.h"
+#include "DemiHandler.h"
 
-bool _TestingController = true; 
+
+//DEMI IS A MALE CAT!!
+
+bool _TestingController = false; 
 
 // NTP constants
 static const long gmtOffset_sec = 28800;
@@ -28,13 +32,7 @@ void mainLoopTask(void* param);
 #define RGB_LED_PIN 48 // Onboard LED for status
 
 // Physical button pins
-#define BTN_RB 4
-#define BTN_RIGHT 5
-#define BTN_DOWN 6
-#define BTN_CENTER 7
-#define BTN_UP 9
-#define BTN_LEFT 10
-#define BTN_LB 11
+// Button definitions in menu.h (included via menu.h)
 
 // Buzzer pin
 #define BUZZER_PIN 40
@@ -44,6 +42,7 @@ void mainLoopTask(void* param);
 #define NOTE_C5 523
 #define NOTE_CS5 554  // C#5
 #define NOTE_C2 65   // Low bass C
+#define NOTE_B4 247  // B4 octave
 
 // Buzzer functions using LEDC (ESP32 PWM)
 void beep(uint16_t frequency, uint16_t durationMs) {
@@ -91,6 +90,10 @@ void beepCSharp(uint16_t durationMs = 50) {
 
 void beepLowC(uint16_t durationMs = 100) {
     beep(NOTE_C2, durationMs);
+}
+
+void beepB4(uint16_t durationMs = 30) {
+    beep(NOTE_B4, durationMs);
 }
 
 // Display margins
@@ -150,6 +153,13 @@ bool btnState_LB = false;
 bool prevBtnState_LB = false;
 bool btnState_RB = false;
 bool prevBtnState_RB = false;
+
+// Demi reset variables
+bool demiResetWaiting = false;
+bool demiResetReady = false;
+bool showResetProgress = false;
+unsigned long demiResetStartTime = 0;
+bool aiDebugEnabled = true;  // Toggle for AI debug logging
 
 // Button handler struct
 struct Button {
@@ -264,18 +274,36 @@ void handleMenuInput() {
         }
     }
     
-    // UP - Page Up (fast scroll up)
+    // UP - Page Up (fast scroll up) OR horizontal enter
     if (wasReleased(btnState_UP, prevBtnState_UP)) {
-        if (!keysBlocked) {
+        if (menuState.isHorizontalMenu) {
+            // Horizontal: enter selected submenu
+            MenuItem* rootItems[] = { &menuDemi, &menuSettings, &menuMicrosoft, &menuPayloads };
+            menuState.currentMenu = rootItems[menuState.horizontalIndex];
+            menuState.selectedItem = menuState.currentMenu->firstChild;
+            menuState.isHorizontalMenu = false;
+            menuState.scrollOffset = 0;
+            menuState.needsRedraw = true;
+            beepC5(50);
+        } else if (!keysBlocked) {
             menuSelectPrev();
         } else {
             keysBlocked = false;
         }
     }
     
-    // DOWN - Page Down (fast scroll down)
+    // DOWN - Page Down (fast scroll down) OR horizontal enter
     if (wasReleased(btnState_DOWN, prevBtnState_DOWN)) {
-        if (downPressedOnEnter) {
+        if (menuState.isHorizontalMenu) {
+            // Horizontal: enter selected submenu
+            MenuItem* rootItems[] = { &menuDemi, &menuSettings, &menuMicrosoft, &menuPayloads };
+            menuState.currentMenu = rootItems[menuState.horizontalIndex];
+            menuState.selectedItem = menuState.currentMenu->firstChild;
+            menuState.isHorizontalMenu = false;
+            menuState.scrollOffset = 0;
+            menuState.needsRedraw = true;
+            beepC5(50);
+        } else if (downPressedOnEnter) {
             downPressedOnEnter = false;
         } else if (!keysBlocked) {
             menuSelectNext();
@@ -290,6 +318,15 @@ void handleMenuInput() {
         if (centerPressedOnEnter) {
             centerPressedOnEnter = false;
             Serial.println("CENTER released (was part of enter combo - ignored)");
+        } else if (menuState.isHorizontalMenu) {
+            // Horizontal: enter selected submenu
+            MenuItem* rootItems[] = { &menuDemi, &menuSettings, &menuMicrosoft, &menuPayloads };
+            menuState.currentMenu = rootItems[menuState.horizontalIndex];
+            menuState.selectedItem = menuState.currentMenu->firstChild;
+            menuState.isHorizontalMenu = false;
+            menuState.scrollOffset = 0;
+            menuState.needsRedraw = true;
+            beepC5(50);  // Enter sound
         } else if (!keysBlocked) {
             menuEnter();
         } else {
@@ -297,18 +334,28 @@ void handleMenuInput() {
         }
     }
     
-    // LEFT - slider decrease (on release)
+    // LEFT - slider decrease (on release) OR horizontal menu nav
     if (wasReleased(btnState_LEFT, prevBtnState_LEFT)) {
-        if (!keysBlocked) {
+        if (menuState.isHorizontalMenu) {
+            // Horizontal: move left (wrap around)
+            menuState.horizontalIndex = (menuState.horizontalIndex + 3) % 4;  // Wrap to previous
+            beepB4(30);  // B4 beep for navigation
+            menuState.needsRedraw = true;
+        } else if (!keysBlocked) {
             menuAdjustValue(-1);
         } else {
             keysBlocked = false;
         }
     }
     
-    // RIGHT - slider increase (on release)
+    // RIGHT - slider increase (on release) OR horizontal menu nav
     if (wasReleased(btnState_RIGHT, prevBtnState_RIGHT)) {
-        if (!keysBlocked) {
+        if (menuState.isHorizontalMenu) {
+            // Horizontal: move right (wrap around)
+            menuState.horizontalIndex = (menuState.horizontalIndex + 1) % 4;  // Wrap to next
+            beepB4(30);  // B4 beep for navigation
+            menuState.needsRedraw = true;
+        } else if (!keysBlocked) {
             menuAdjustValue(+1);
         } else {
             keysBlocked = false;
@@ -434,6 +481,10 @@ void setup() {
     setState(STATE_IDLE);
     drawSpriteWithStats(u8g2, getCurrentSprite());
 
+    // Load Demi's saved stats
+    loadAll();
+    Serial.println("Demi's stats loaded!");
+
     Serial.println("Display initialized with sprite animation + stats");
 
     // Create WiFi command queue for cross-core communication
@@ -466,6 +517,18 @@ void setup() {
     delay(5000);
      Serial.println("--- [ ESP32 HEALTH REPORT ] --- \n");
      printHealthStatus();   
+
+    Serial.println("\n \n \n \n");
+    Serial.println("[MAIN] About to create DemiMoodModel...");
+    Serial.flush();
+    // Initialize Demi Neural Network - create local then assign
+    DemiMoodModel tempModel;
+    moodModel = tempModel;
+    Serial.flush();
+    Serial.println("[MAIN] DemiMoodModel created, checking ready...");
+    Serial.flush();
+    Serial.printf("✅ Demi AI Neural Network: %s\n", moodModel.isReady() ? "RUNNING" : "NOT READY");
+    Serial.flush();
     
     Serial.println("\n-------- [END OF SETUP()] --------\n");
 
@@ -554,7 +617,8 @@ void mainLoopTask(void* param) {
         }
 
         // Check for menu enter (RB button) - with delay after boot
-        if (currentState == STATE_IDLE && btnState_RB) {
+        // DISABLED during reset waiting - RB is exclusively for reset confirmation
+        if (currentState == STATE_IDLE && btnState_RB && !demiResetWaiting) {
             if (millis() - systemBootTime >= MENU_ENTER_DELAY_MS) {
                 keysBlocked = true;
                 beepC5(80);
@@ -562,9 +626,88 @@ void mainLoopTask(void* param) {
             }
         }
 
+        // Handle reset waiting phase (waiting for RB to be pressed)
+        if (demiResetWaiting && !demiResetReady) {
+            // 60 second timeout to press RB
+            if (millis() - demiResetStartTime > 60000) {
+                demiResetWaiting = false;
+                Serial.println("❌ Reset timed out - cancelled");
+            } else if (btnState_RB) {
+                // RB pressed - start the 5 second hold
+                demiResetReady = true;
+                showResetProgress = true;
+                demiResetStartTime = millis();  // Reset timer for hold duration
+            }
+            // Block all other menu navigation during reset waiting
+            keysBlocked = true;
+        }
+
+        // Reset progress screen - hold RB for 5 seconds
+        if (showResetProgress && demiResetReady) {
+            unsigned long elapsed = millis() - demiResetStartTime;
+            unsigned long remaining = (elapsed >= 5000) ? 0 : (5000 - elapsed);
+            int progress = (int)(elapsed * 100 / 5000);  // 0-100%
+            
+            // Clear and draw progress
+            u8g2.clearBuffer();
+            u8g2.setFont(u8g2_font_ncenB14_tr);
+            
+            // Draw circular progress (arc)
+            int cx = 64, cy = 28, r = 20;
+            for (int i = 0; i < 360; i += 3) {
+                if (i < progress * 3.6) {
+                    float angle = i * PI / 180;
+                    int x = cx + r * cos(angle);
+                    int y = cy + r * sin(angle);
+                    u8g2.drawPixel(x, y);
+                }
+            }
+            
+            // Countdown text
+            char countStr[8];
+            snprintf(countStr, sizeof(countStr), "%d.%d", remaining / 1000, (remaining % 1000) / 100);
+            u8g2.setCursor(50, 58);
+            u8g2.print(countStr);
+            
+            u8g2.sendBuffer();
+            
+            // Check if held long enough
+            if (!btnState_RB) {
+                // Released early - cancel
+                showResetProgress = false;
+                demiResetReady = false;
+                Serial.println("Reset cancelled");
+            } else if (elapsed >= 5000) {
+                // Complete - reset stats
+                hunger = 100; happiness = 100; energy = 100;
+                health = 100; cleanliness = 100; isSleeping = false;
+                ai = DemiAI();
+                saveAll();
+                
+                // Show resetting message
+                u8g2.clearBuffer();
+                u8g2.setFont(u8g2_font_ncenB14_tr);
+                u8g2.setCursor(25, 35);
+                u8g2.print("RESETTING");
+                u8g2.sendBuffer();
+                delay(1500);
+                
+                showResetProgress = false;
+                demiResetReady = false;
+                Serial.println("✅ Demi stats reset!");
+            }
+        }
+
         if (currentState == STATE_MENU) {
             handleMenuInput();
         } else {
+            // Wake up from sleep if any button pressed
+            if (isSleeping && (btnState_UP || btnState_DOWN || btnState_CENTER || 
+                               btnState_LEFT || btnState_RIGHT || btnState_LB || btnState_RB)) {
+                isSleeping = false;
+                saveAll();
+                Serial.println("[Demi] Woke up!");
+            }
             updateDemi(u8g2);
         }
         

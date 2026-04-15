@@ -83,6 +83,7 @@ extern int numSavedNetworks;
 extern int selectedNetworkIndex;
 extern bool isInScannedNetwork;
 extern bool isInSavedNetwork;
+extern bool scaryNetworkFound;
 
 void initWifiHandler();
 void deinitWifiHandler();

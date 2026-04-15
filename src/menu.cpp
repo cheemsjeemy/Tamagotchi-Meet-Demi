@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "menu.h"
 #include "QRCode.h"
+#include "miscellaneous/MenuSprites.h"
 #include <string.h>
 #include <WiFi.h>
 #include <DNSServer.h>
@@ -13,12 +14,13 @@
 #include "miscellaneous/names.h"
 
 #include "WiFiHandler.h"
+#include "DemiHandler.h"
 
 
 // Forward declarations for TOTP functions
 void initTotp();
 
-// Base32 secret for MS Authenticator setup
+// Base32 secret for Microsoft Auth setup
 #define TOTP_BASE32_SECRET "srv62zqnx7hwldq5"
 
 
@@ -138,7 +140,7 @@ MenuItem menuSettings = menuFolder("Settings");
 MenuItem menuDemi     = menuFolder("Demi");
 MenuItem menuWifi     = menuFolder("Wifi");
 MenuItem menuBluetooth = menuFolder("Bluetooth");
-MenuItem menuMSAuth   = menuFolder("MSAuth");
+MenuItem menuMicrosoft   = menuFolder("Microsoft");
 MenuItem menuPayloads = menuFolder("Payloads");
 
 // ============================================
@@ -367,7 +369,7 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         return totp != nullptr && keyLength > 0;
     }
 
-    // Get the base32 secret for MS Authenticator setup
+    // Get the base32 secret for Microsoft Auth setup
     const char* getTotpSecret() {
         return TOTP_BASE32_SECRET;
     }
@@ -539,10 +541,10 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         // Link root items together as siblings
         menuSettings.nextSibling = &menuDemi;
         menuDemi.prevSibling = &menuSettings;
-        menuDemi.nextSibling = &menuMSAuth;
-        menuMSAuth.prevSibling = &menuDemi;
-        menuMSAuth.nextSibling = &menuPayloads;
-        menuPayloads.prevSibling = &menuMSAuth;
+        menuDemi.nextSibling = &menuMicrosoft;
+        menuMicrosoft.prevSibling = &menuDemi;
+        menuMicrosoft.nextSibling = &menuPayloads;
+        menuPayloads.prevSibling = &menuMicrosoft;
         menuPayloads.nextSibling = nullptr;
 
         // Settings children: WiFi -> Bluetooth -> Brightness -> About -> Save Settings
@@ -773,11 +775,11 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         menuNetworkQR.parent = nullptr;
         menuNetworkQR.nextSibling = nullptr;
 
-        // MSAuth submenu: Setup Secret -> Show Code
-        menuMSAuth.firstChild = &menuTotpSetup;
-        menuTotpSetup.parent = &menuMSAuth;
+        // Microsoft submenu: Setup Secret -> Show Code
+        menuMicrosoft.firstChild = &menuTotpSetup;
+        menuTotpSetup.parent = &menuMicrosoft;
         menuTotpSetup.nextSibling = &menuTotpShowCode;
-        menuTotpShowCode.parent = &menuMSAuth;
+        menuTotpShowCode.parent = &menuMicrosoft;
         menuTotpShowCode.nextSibling = nullptr;
         menuTotpShowCode.prevSibling = &menuTotpSetup;
     }
@@ -819,11 +821,13 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
 
         // Start at root for each menu entry, but don't reinitialize services.
         menuState.currentMenu = nullptr;
-        menuState.selectedItem = &menuSettings;
+        menuState.selectedItem = &menuDemi;
         menuState.scrollOffset = 0;
         menuState.needsRedraw = true;
         menuState.isEditing = false;
         menuState.justEntered = false;
+        menuState.isHorizontalMenu = true;
+        menuState.horizontalIndex = 0;
     }
 
 
@@ -1037,6 +1041,16 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
 
             // Restore the item we had selected at root (the folder we came from)
             menuState.selectedItem = previousFolder;
+            
+            // Return to horizontal menu mode and find the index
+            menuState.isHorizontalMenu = true;
+            MenuItem* rootItems[] = { &menuDemi, &menuSettings, &menuMicrosoft, &menuPayloads };
+            for (uint8_t i = 0; i < 4; i++) {
+                if (rootItems[i] == previousFolder) {
+                    menuState.horizontalIndex = i;
+                    break;
+                }
+            }
         }
 
         menuState.scrollOffset = 0;
@@ -1309,7 +1323,7 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             u8g2.setFont(u8g2_font_6x10_tf);
             u8g2.setDrawColor(1);
 
-            u8g2.drawStr(0, 10, "MS Authenticator");
+            u8g2.drawStr(0, 10, "Microsoft Auth.");
             u8g2.drawStr(0, 25, "Setup Secret:");
             
             // Display the base32 secret
@@ -1318,11 +1332,11 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             u8g2.drawStr(0, 50, secret);
             
             u8g2.setFont(u8g2_font_5x8_tr);
-            u8g2.drawStr(0, 70, "Enter this in MS Authenticator:");
-            u8g2.drawStr(0, 80, "1. Open MS Authenticator");
-            u8g2.drawStr(0, 90, "2. Add account -> Other");
-            u8g2.drawStr(0, 100, "3. Enter secret above");
-            u8g2.drawStr(0, 110, "4. Account name: Demi");
+            u8g2.drawStr(0, 70, "Enter in MS Auth app:");
+            u8g2.drawStr(0, 80, "1. Open MS Auth");
+            u8g2.drawStr(0, 90, "2. Add -> Other");
+            u8g2.drawStr(0, 100, "3. Enter secret");
+            u8g2.drawStr(0, 110, "4. Name: Demi");
             
             u8g2.sendBuffer();
             return;
@@ -1445,6 +1459,78 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         lastBlinkState = showCursor;
 
         u8g2.clearBuffer();
+
+        // === HORIZONTAL ICON MENU (Root Level) ===
+        if (menuState.isHorizontalMenu) {
+            MenuItem* rootItems[] = { &menuDemi, &menuSettings, &menuMicrosoft, &menuPayloads };
+            uint8_t totalIcons = 4;
+            uint8_t idx = menuState.horizontalIndex;
+            
+            // Calculate indices for left, center, right icons
+            int8_t leftIdx = (idx - 1 + totalIcons) % totalIcons;
+            int8_t rightIdx = (idx + 1) % totalIcons;
+            
+            // Column centers (128px / 3 = ~42px per column)
+            // Col 1: 0-41, center=21 | Col 2: 42-85, center=64 | Col 3: 86-127, center=107
+            uint8_t centerX = 64;  // Column 2 center
+            uint8_t leftX = 13;    // Column 1 center (21) minus half bitmap width (8)
+            uint8_t rightX = 99;  // Column 3 center (107) minus half bitmap width (8)
+            
+            u8g2.setDrawColor(1);
+            
+            // Draw LEFT icon (column 1 center=21)
+            MenuItem* leftItem = rootItems[leftIdx];
+            if (leftItem == &menuSettings) {
+                u8g2.setFont(u8g2_font_open_iconic_embedded_2x_t);
+                u8g2.drawGlyph(13, 36, 0x42);  // 21 - 8 = 13 (centered for 16px glyph)
+            } else if (leftItem == &menuDemi) {
+                u8g2.drawBitmap(13, 20, 2, 16, DemiSmall);  // 21 - 8 = 13
+            } else if (leftItem == &menuMicrosoft) {
+                u8g2.drawBitmap(13, 20, 2, 16, MicrosoftSmall);  // 21 - 8 = 13
+            } else if (leftItem == &menuPayloads) {
+                u8g2.setFont(u8g2_font_open_iconic_mime_2x_t);
+                u8g2.drawGlyph(13, 36, 0x43);  // 21 - 8 = 13
+            }
+            
+            // Draw CENTER icon (32x32) with square highlight (40x40 box)
+            MenuItem* centerItem = rootItems[idx];
+            u8g2.drawFrame(centerX - 20, 2, 40, 40);  // Vertically centered box
+            
+            if (centerItem == &menuSettings) {
+                u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);
+                u8g2.drawGlyph(centerX - 16, 38, 0x42);
+            } else if (centerItem == &menuDemi) {
+                u8g2.drawBitmap(centerX - 16, 4, 4, 32, DemiBig);
+            } else if (centerItem == &menuMicrosoft) {
+                u8g2.drawBitmap(centerX - 16, 6, 4, 32, MicrosoftBig);
+            } else if (centerItem == &menuPayloads) {
+                u8g2.setFont(u8g2_font_open_iconic_mime_4x_t);
+                u8g2.drawGlyph(centerX - 16, 38, 0x43);
+            }
+            
+            // Draw RIGHT icon (column 3 center=107)
+            MenuItem* rightItem = rootItems[rightIdx];
+            if (rightItem == &menuSettings) {
+                u8g2.setFont(u8g2_font_open_iconic_embedded_2x_t);
+                u8g2.drawGlyph(99, 36, 0x42);  // 107 - 8 = 99 (centered for 16px glyph)
+            } else if (rightItem == &menuDemi) {
+                u8g2.drawBitmap(99, 20, 2, 16, DemiSmall);  // 107 - 8 = 99
+            } else if (rightItem == &menuMicrosoft) {
+                u8g2.drawBitmap(99, 20, 2, 16, MicrosoftSmall);  // 107 - 8 = 99
+            } else if (rightItem == &menuPayloads) {
+                u8g2.setFont(u8g2_font_open_iconic_mime_2x_t);
+                u8g2.drawGlyph(99, 36, 0x43);  // 107 - 8 = 99
+            }
+            
+            // Draw selection name below center icon (smaller font)
+            u8g2.setFont(u8g2_font_5x8_tr);
+            uint8_t nameWidth = strlen(centerItem->name) * 5;
+            u8g2.drawStr(centerX - (nameWidth / 2), 56, centerItem->name);
+            
+            u8g2.sendBuffer();
+            menuState.needsRedraw = false;
+            return;
+        }
 
         // === 1. Draw Directory Path (Top) ===
         u8g2.setFont(u8g2_font_5x8_tr);
@@ -1620,23 +1706,35 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
     }
 
     void cbPetting() {
-        Serial.println("Menu: Petting action!");
+        happiness = min(100, happiness + 15);
+        energy = min(100, energy + 5);
+        onCareAction();
+        Serial.println("[Demi] Purrrrrr~");
     }
 
     void cbJumping() {
-        Serial.println("Menu: Jumping action!");
+        happiness = min(100, happiness + 20);
+        energy = max(0, energy - 10);
+        onCareAction();
+        Serial.println("[Demi] WHEEEEEE!");
     }
 
     void cbWash() {
-        Serial.println("Menu: Wash action!");
+        cleanliness = min(100, cleanliness + 30);
+        saveAll();
+        Serial.println("[Demi] squeak clean!");
     }
 
     void cbSleep() {
-        Serial.println("Menu: Sleep action!");
+        isSleeping = true;
+        saveAll();
+        Serial.println("[Demi] Zzz... naptime!");
     }
 
     void cbFeed() {
-        Serial.println("Menu: Feed action!");
+        hunger = min(100, hunger + 10);
+        onCareAction();
+        Serial.println("[Demi] Yum thanks~");
     }
 
     void cbWifiToggle() {
@@ -1914,7 +2012,7 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
     }
 
     void cbMSAuth() {
-        Serial.println("Menu: MSAuth action selected");
+        Serial.println("Menu: Microsoft action selected");
 
         // Check if WiFi is connected - required for NTP sync
         // Use WiFiHandler status
@@ -1946,7 +2044,7 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         Serial.println("Menu: TOTP Setup Secret selected");
         showTotpSecret = true;
         menuState.needsRedraw = true;
-        Serial.println("[TOTP] Showing TOTP secret for MS Authenticator setup");
+        Serial.println("[TOTP] Showing TOTP secret for Microsoft Auth setup");
     }
 
     void cbSaveSettings() {

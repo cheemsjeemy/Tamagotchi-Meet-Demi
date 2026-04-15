@@ -7,6 +7,18 @@
 //#include "freertos/FreeRTOS.h"
 //#include "freertos/task.h"
 
+// Demi stats externs for resetstats command
+extern int hunger, happiness, energy, health, cleanliness;
+extern bool isSleeping;
+extern bool btnState_RB;
+extern bool demiResetWaiting;
+extern bool showResetProgress;
+extern unsigned long demiResetStartTime;
+extern bool demiResetReady;
+extern bool aiDebugEnabled;
+extern DemiAI ai;
+void saveAll();
+
 typedef void (*CommandFunction)(); 
 
 struct Command {
@@ -123,13 +135,44 @@ inline void playBeep()  { Serial.println("Buzzer triggered!"); }
 
 // The Table
 const Command commandTable[] = {
-    // Name      Alias    Description             Function
-    {"help",     "h",     "Show this help menu",  showHelp},
-    {"health",     "hr",     "Show internal health", getHealth},
-    {"beep",     "b",     "Trigger the buzzer",   playBeep},
-    {"tasks",    "t",     "Show FreeRTOS tasks", showAllTasks},
-    {"ping",     "p",     "Ping test command",   [](){ Serial.println("Pong!"); }},
-    {"reset",    "",     "Restart the device",  [](){ ESP.restart(); }},
+    // Name         Alias    Description             Function
+    {"help",       "h",     "Show this help menu",  showHelp},
+    {"health",     "hr",    "Show internal health", getHealth},
+    {"beep",       "b",     "Trigger the buzzer",   playBeep},
+    {"tasks",      "t",     "Show FreeRTOS tasks",  showAllTasks},
+    {"ping",       "p",     "Ping test command",    [](){ Serial.println("Pong!"); }},
+    {"reset",      "",      "Restart the device",  [](){ ESP.restart(); }},
+    {"rst",        "",      "Start stats reset", [](){
+        if (demiResetWaiting) {
+            Serial.println("❌ Reset already in progress");
+        } else {
+            demiResetWaiting = true;
+            demiResetStartTime = millis();
+            Serial.println("TYPE 'DEMI' to confirm (type 'BACK' to cancel)");
+        }
+    }},
+    {"DEMI", "", "Confirm reset", [](){
+        if (!demiResetWaiting) {
+            Serial.println("❌ Type 'rst' first to start reset");
+        } else {
+            Serial.println("✅ Hold RB for 5 seconds to reset...");
+        }
+    }},
+    {"BACK", "", "Cancel reset", [](){
+        if (demiResetWaiting) {
+            demiResetWaiting = false;
+            demiResetReady = false;
+            showResetProgress = false;
+            Serial.println("✅ Reset cancelled.");
+        } else {
+            Serial.println("No reset in progress.");
+        }
+    }},
+    {"aidebug", "", "Toggle AI debug logs", [](){ 
+        extern bool aiDebugEnabled;
+        aiDebugEnabled = !aiDebugEnabled;
+        Serial.printf("AI Debug logging: %s\n", aiDebugEnabled ? "ON" : "OFF");
+    }},
 };
 
 const int cmdCount = sizeof(commandTable) / sizeof(Command);
