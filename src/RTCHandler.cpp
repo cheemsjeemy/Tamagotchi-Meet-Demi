@@ -20,9 +20,27 @@ bool initRTC() {
     }
     
     DateTime now = rtc.now();
+    // Add 8 hours for Philippines timezone (UTC+8)
+    int hour = now.hour() + 8;
+    int day = now.day();
+    int month = now.month();
+    int year = now.year();
+    
+    if (hour >= 24) {
+        hour -= 24;
+        day++;
+        if (day > 31 || (month == 2 && day > 28) || ((month == 4 || month == 6 || month == 9 || month == 11) && day > 30)) {
+            day = 1;
+            month++;
+            if (month > 12) {
+                month = 1;
+                year++;
+            }
+        }
+    }
+    
     Serial.printf("[RTC] Time: %04d-%02d-%02d %02d:%02d:%02d\n",
-        now.year(), now.month(), now.day(),
-        now.hour(), now.minute(), now.second());
+        year, month, day, hour, now.minute(), now.second());
     
     return true;
 }
