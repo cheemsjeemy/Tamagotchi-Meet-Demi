@@ -13,6 +13,9 @@
 #include <SPIFFS.h>
 #include "miscellaneous/commands.h"
 #include "DemiHandler.h"
+#include "RTCHandler.h"
+#include "Payloads/Oscilloscope.h"
+#include "captive_portal.h"
 
 
 //DEMI IS A MALE CAT!!
@@ -159,7 +162,7 @@ bool demiResetWaiting = false;
 bool demiResetReady = false;
 bool showResetProgress = false;
 unsigned long demiResetStartTime = 0;
-bool aiDebugEnabled = true;  // Toggle for AI debug logging
+bool aiDebugEnabled = false;  // Toggle for AI debug logging
 
 // Button handler struct
 struct Button {
@@ -227,6 +230,34 @@ unsigned long systemBootTime = 0;
 
 
 
+// Fade-in animation for OLED display using hardware contrast control
+void fadeInDisplay(uint16_t durationMs = 1500) { // Slowed down to see the start
+    u8g2.setPowerSave(0); 
+    u8g2.setContrast(5); // Force black start
+    u8g2.sendBuffer(); 
+    
+    uint32_t startTime = millis();
+    
+    while (true) {
+        uint32_t elapsed = millis() - startTime;
+        if (elapsed >= durationMs) break;
+
+        float progress = (float)elapsed / durationMs;
+
+        // Sine Ease-In: This starts the slope at almost zero.
+        // It stays in the "dim" values (1-20) for much longer.
+        float ease = 1.0f - cos((progress * PI) / 2.0f); // Standard Ease-In
+        
+        // We square the ease to make it stay "near zero" even longer
+        uint8_t contrast = (uint8_t)(ease * ease * 255.0f); 
+        
+        u8g2.setContrast(contrast);  
+        
+        delay(10); // Maintain 100fps
+    }
+    
+    u8g2.setContrast(255); 
+}
 // Draw sprite centered on display
 void drawSprite(const unsigned char* sprite) {
     u8g2.clearBuffer();
@@ -391,13 +422,15 @@ void printHealthStatus() {
     uint32_t freePsram = ESP.getFreePsram();
     uint32_t usedPsram = totalPsram - freePsram;
 
-    Serial.println("\n--- LIVE MEMORY USAGE ---");
+    Serial.println("\n \n \n \n");
+
+    Serial.println("\n--- LIVE MEMORY USAGE --- \n");
 
     Serial.println("[INTERNAL RAM]");
     Serial.printf("  USED: %6.2f KB | FREE: %6.2f KB | TOTAL: %.2f KB (%.1f%% Used)\n", 
         usedInt/1024.0, freeInt/1024.0, totalInt/1024.0, ((float)usedInt/totalInt)*100);
 
-    Serial.println("\n[PSRAM (8MB R8)]");
+    Serial.println("\n \n[PSRAM (8MB R8)]");
     if (totalPsram > 0) {
         Serial.printf("  USED: %6.2f MB | FREE: %6.2f MB | TOTAL: %.2f MB (%.1f%% Used)\n", 
             usedPsram/(1024.0*1024.0), freePsram/(1024.0*1024.0), totalPsram/(1024.0*1024.0), ((float)usedPsram/totalPsram)*100);
@@ -405,7 +438,7 @@ void printHealthStatus() {
         Serial.println("  PSRAM not enabled!");
     }
 
-    Serial.println("\n[FLASH PARTITION DETAILED USAGE (N16)]");
+    Serial.println("\n \n[FLASH PARTITION DETAILED USAGE (N16)]");
     esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
     while (it != NULL) {
         const esp_partition_t *p = esp_partition_get(it);
@@ -435,13 +468,13 @@ void printHealthStatus() {
     }
     esp_partition_iterator_release(it);
 
-    Serial.println("\n[SYSTEM SUMMARY]");
+    Serial.println("\n \n[SYSTEM SUMMARY]");
     Serial.printf("  Physical Chip Total: %.2f MB\n", ESP.getFlashChipSize()/(1024.0*1024.0));
     Serial.printf("  Internal Chip Temp:  %.2f °C\n", temperatureRead());
-    Serial.printf("CPU FREQUENCY: %d MHz\n", getCpuFrequencyMhz());
-    Serial.printf("SDK Version: %s\n", ESP.getSdkVersion());
+    Serial.printf("  CPU FREQUENCY: %d MHz\n", getCpuFrequencyMhz());
+    Serial.printf("  SDK Version: %s\n", ESP.getSdkVersion());
 
-    Serial.println("\n--- END OF HEALTH REPORT ---");
+    Serial.println("\n--- END OF HEALTH REPORT ---\n \n");
 
 }
 
@@ -450,8 +483,49 @@ void printHealthStatus() {
 
 void setup() {
     Serial.begin(115200);
-    esp_task_wdt_init(10, false); // Ensure watchdog timer initialization works
     delay(1000);
+    
+    // Check reset reason - tells us WHY the ESP32 reset
+    esp_reset_reason_t resetReason = esp_reset_reason();
+    
+    // Use RGB LED to indicate reset type (visible even without Serial)
+    // Red = Brownout, Blue = Panic/Crash, Green = Normal, Yellow = Watchdog
+    switch (resetReason) {
+        case ESP_RST_POWERON:
+            Serial.println("\n=== [RESET REASON] POWERON - Normal startup ===\n");
+            neopixelWrite(RGB_LED_PIN, 0, 50, 0); // Green
+            delay(500);
+            break;
+        case ESP_RST_BROWNOUT:
+            Serial.println("\n=== [RESET REASON] BROWNOUT - Voltage dropped! ===\n");
+            neopixelWrite(RGB_LED_PIN, 50, 0, 0); // Red
+            // Flash red 3 times to get attention
+            for (int i = 0; i < 3; i++) {
+                neopixelWrite(RGB_LED_PIN, 0, 0, 0);
+                delay(200);
+                neopixelWrite(RGB_LED_PIN, 50, 0, 0);
+                delay(200);
+            }
+            break;
+        case ESP_RST_PANIC:
+            Serial.println("\n=== [RESET REASON] PANIC - Code crash! ===\n");
+            neopixelWrite(RGB_LED_PIN, 0, 0, 50); // Blue
+            delay(1000);
+            break;
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_INT_WDT:
+            Serial.println("\n=== [RESET REASON] WATCHDOG TIMEOUT ===\n");
+            neopixelWrite(RGB_LED_PIN, 50, 50, 0); // Yellow
+            delay(1000);
+            break;
+        default:
+            Serial.printf("\n=== [RESET REASON] UNKNOWN (%d) ===\n\n", resetReason);
+            neopixelWrite(RGB_LED_PIN, 0, 50, 50); // Cyan
+            delay(500);
+            break;
+    }
+    
+    esp_task_wdt_init(10, false); // Ensure watchdog timer initialization works
     Serial.println("--- Booting ESP32-S3 N16R8 ---");
     Serial.println("Initializing system...");
 
@@ -463,21 +537,28 @@ void setup() {
 
     // Initialize I2C and display
     Wire.setPins(OLED_SDA_PIN, OLED_SCL_PIN);
+   
+    
     if (!Wire.begin()) {
         Serial.println("I2C Hardware Init Failed!");
         neopixelWrite(RGB_LED_PIN, 50, 0, 0); // Red for error
         while (1);
     }
-
+    //Wire.setClock(400000); // 400kHz for faster display updates
     if (u8g2.begin()) {
+        delay(200);
+        u8g2.setContrast(255); // Start at max contrast for fade-in
+    
         Serial.println("U8g2 initialized successfully on 8/9");
         neopixelWrite(RGB_LED_PIN, 0, 50, 0); // Green for success
+        
+        // Smooth fade-in animation for display
+        //fadeInDisplay(4000);  // 4000ms fade-in
     } else {
         Serial.println("SH1106 not found. Check address/wiring.");
         neopixelWrite(RGB_LED_PIN, 50, 25, 0); // Orange for "Display not found"
     }
 
-    u8g2.setContrast(255); // Maximum brightness
     setState(STATE_IDLE);
     drawSpriteWithStats(u8g2, getCurrentSprite());
 
@@ -518,7 +599,11 @@ void setup() {
      Serial.println("--- [ ESP32 HEALTH REPORT ] --- \n");
      printHealthStatus();   
 
-    Serial.println("\n \n \n \n");
+    Serial.println("[Setup] Oscilloscope initialized");   
+
+    initRTC();   
+
+    Serial.println("\n \n");
     Serial.println("[MAIN] About to create DemiMoodModel...");
     Serial.flush();
     // Initialize Demi Neural Network - create local then assign
@@ -557,8 +642,10 @@ void loop() {
                 }
             }
             if (!found) Serial.println("Invalid command. Type 'h' for help.");
-        }
+    processCaptivePortalDNS();
 }
+}
+
 }
 // Main loop task pinned to Core 1
 void mainLoopTask(void* param) {
@@ -699,19 +786,38 @@ void mainLoopTask(void* param) {
         }
 
         if (currentState == STATE_MENU) {
-            handleMenuInput();
-        } else {
-            // Wake up from sleep if any button pressed
-            if (isSleeping && (btnState_UP || btnState_DOWN || btnState_CENTER || 
-                               btnState_LEFT || btnState_RIGHT || btnState_LB || btnState_RB)) {
-                isSleeping = false;
-                saveAll();
-                Serial.println("[Demi] Woke up!");
+            if (oscilloscopeActive) {
+                updateOscilloscope(u8g2, btnState_LEFT, btnState_RIGHT, 
+                    wasPressed(btnState_LEFT, prevBtnState_LEFT), 
+                    wasPressed(btnState_RIGHT, prevBtnState_RIGHT));
+                if (wasReleased(btnState_RB, prevBtnState_RB)) {
+                    stopOscilloscope();
+                    menuState.needsRedraw = true;
+                }
+            } else {
+                handleMenuInput();
             }
-            updateDemi(u8g2);
+        } else {
+            if (oscilloscopeActive) {
+                updateOscilloscope(u8g2, btnState_LEFT, btnState_RIGHT,
+                    wasPressed(btnState_LEFT, prevBtnState_LEFT),
+                    wasPressed(btnState_RIGHT, prevBtnState_RIGHT));
+                if (wasReleased(btnState_RB, prevBtnState_RB)) {
+                    stopOscilloscope();
+                }
+            } else {
+                // Wake up from sleep if any button pressed
+                if (isSleeping && (btnState_UP || btnState_DOWN || btnState_CENTER || 
+                                    btnState_LEFT || btnState_RIGHT || btnState_LB || btnState_RB)) {
+                    isSleeping = false;
+                    saveAll();
+                    Serial.println("[Demi] Woke up!");
+                }
+                updateDemi(u8g2);
+            }
         }
-        
         delay(5);
         yield();
     }
 }
+

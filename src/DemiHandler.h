@@ -125,12 +125,19 @@ extern DemiMoodModel moodModel;
 #define STAT_UPDATE_INTERVAL_MS 20000     // Main timer interval (20 seconds)
 
 // Drop intervals - staggered for natural feel
-// All stats now drop at similar rates (12-hour cycle)
+// All stats drop at similar rates (~12-hour cycle)
 // Calculation: (20s × interval × 100 drops) / 3600 = hours to deplete
+// Offset ensures they don't all sync up
 #define HUNGER_DROP_INTERVAL 24           // Every 480 sec (8 min) = ~7.5 pts/hr → 12-13 hrs
 #define ENERGY_DROP_INTERVAL 26           // Every 520 sec (8.7 min) = ~6.9 pts/hr → 13-14 hrs  
 #define HAPPINESS_DROP_INTERVAL 28        // Every 560 sec (9.3 min) = ~6.4 pts/hr → 14-15 hrs
 #define CLEANLINESS_DROP_INTERVAL 25      // Every 500 sec (8.3 min) = ~7.2 pts/hr → 13 hrs
+
+// Drop offsets to stagger depletion (prevents all stats dropping at once)
+#define HUNGER_DROP_OFFSET 0
+#define ENERGY_DROP_OFFSET 12
+#define HAPPINESS_DROP_OFFSET 6
+#define CLEANLINESS_DROP_OFFSET 18
 
 // Drop amounts per tick
 #define HUNGER_DROP_AMOUNT 1

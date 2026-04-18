@@ -12,9 +12,11 @@
 #include <qrcode.h>
 #include <time.h>
 #include "miscellaneous/names.h"
+#include "Payloads/Oscilloscope.h"
 
 #include "WiFiHandler.h"
 #include "DemiHandler.h"
+#include "RTCHandler.h"
 
 
 // Forward declarations for TOTP functions
@@ -71,6 +73,7 @@ unsigned long lastNtpSync = 0;
 
 // Last TOTP code generation time
 unsigned long lastTotpUpdate = 0;
+uint8_t lastTotpPeriod = 0;
 
 // NTP sync interval (1 hour = 3600000 ms)
 const unsigned long NTP_SYNC_INTERVAL = 3600000;
@@ -106,6 +109,7 @@ void cbSaveSettings();
 // WiFi callbacks
 void cbWifiStatus();
 void cbWifiScan();
+void cbWifiMode();
 void cbWifiForget();
 void cbWifiConnect();
 void cbWifiDisconnect();
@@ -191,7 +195,11 @@ MenuItem menuStrawberry = menuAction("Strawberry", cbFeed);
 // WIFI MENU ITEMS
 // ============================================
 
+// WiFi mode: false = STA (auto-connect), true = AP only (captive portal)
+static bool wifiModeAP = false;
 static char wifiStatusText[20] = "Status: OFF";
+
+MenuItem menuWifiMode = menuAction("Mode: STA", cbWifiMode);
 MenuItem menuWifiStatus    = menuStatus(wifiStatusText, cbWifiStatus);
 MenuItem menuWifiEnabled   = menuToggle("Toggle WiFi", cbWifiToggle, "wifi_enabled");
 MenuItem menuWifiDisconnect = menuAction("Disconnect", cbWifiDisconnect);
@@ -247,6 +255,12 @@ MenuItem menuDevicePassword = menuAction("Pass: demiesp32", cbShowPassword);
 
 MenuItem menuTotpSetup      = menuAction("Setup Secret", cbTotpSetup);
 MenuItem menuTotpShowCode   = menuAction("Show Code", cbMSAuth);
+
+// ============================================
+// PAYLOADS SUBMENU
+// ============================================
+
+MenuItem menuOscilloscope = menuAction("Oscilloscope", cbOscilloscope);
 
 // ============================================
 // CONNECTIONS (NEW - from menu_plan.md)
@@ -381,11 +395,20 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             return;
         }
 
-        // Get the current time
-        time_t now = time(nullptr);
-        if (now < 1000000000) { // Ensure time is synced
+        // Get the current time - Priority: WiFi on → NTP | WiFi off → RTC
+        time_t now = 0;
+        
+        if (wifiIsConnected()) {
+            now = time(nullptr);
+            if (now < 1000000000) {
+                now = wifiGetTime();
+            }
+        } else {
+            now = getUnixTime();
+        }
+        
+        if (now < 1000000000) {
             Serial.println("[TOTP] Time not synced yet");
-            
             return;
         }
 
@@ -436,6 +459,12 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         // Load WiFi toggle
         if (preferences.isKey("wifi_enabled")) {
             menuWifiEnabled.boolValue = preferences.getBool("wifi_enabled", false);
+        }
+
+        // Load WiFi mode (STA vs AP)
+        if (preferences.isKey("wifi_mode_ap")) {
+            wifiModeAP = preferences.getBool("wifi_mode_ap", false);
+            menuWifiMode.name = wifiModeAP ? "Mode: AP" : "Mode: STA";
         }
 
         // Load Bluetooth toggle
@@ -649,7 +678,12 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         // WiFi Toggle
         menuWifiEnabled.parent = &menuWifi;
         menuWifiEnabled.prevSibling = nullptr;  // first child
-        menuWifiEnabled.nextSibling = &menuWifiDisconnect;
+        menuWifiEnabled.nextSibling = &menuWifiMode;
+
+        // WiFi Mode (STA/AP)
+        menuWifiMode.parent = &menuWifi;
+        menuWifiMode.prevSibling = &menuWifiEnabled;
+        menuWifiMode.nextSibling = &menuWifiDisconnect;
 
         // WiFi Disconnect
         menuWifiDisconnect.parent = &menuWifi;
@@ -782,6 +816,11 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         menuTotpShowCode.parent = &menuMicrosoft;
         menuTotpShowCode.nextSibling = nullptr;
         menuTotpShowCode.prevSibling = &menuTotpSetup;
+
+        // Payloads submenu: Oscilloscope
+        menuPayloads.firstChild = &menuOscilloscope;
+        menuOscilloscope.parent = &menuPayloads;
+        menuOscilloscope.nextSibling = nullptr;
     }
 
     // ============================================
@@ -1343,44 +1382,41 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         }
 
         if (showTotpCode) {
-            time_t now;
-
-            // Check if WiFi is still connected
-            if (!wifiIsConnected()) {
-                u8g2.clearBuffer();
-                u8g2.setFont(u8g2_font_6x10_tf);
-                u8g2.setDrawColor(1);
-
-                u8g2.drawStr(0, 10, "WiFi Required!");
-                u8g2.drawStr(0, 25, "Connect to WiFi");
-                u8g2.drawStr(0, 40, "via Wifi menu");
-                u8g2.drawStr(0, 55, "before generating");
-                u8g2.drawStr(0, 70, "TOTP codes");
-
-                u8g2.sendBuffer();
-                menuState.needsRedraw = true;
-                return;
+            // Get time - Priority: WiFi on → NTP | WiFi off → RTC
+            time_t now = 0;
+            
+            if (wifiIsConnected()) {
+                now = time(nullptr);
+                if (now < 1000000000) {
+                    now = wifiGetTime();
+                }
+            } else {
+                now = getUnixTime();
             }
-
-            // Try to sync NTP if not synced
-            if (shouldSyncNtp() && wifiIsConnected()) {
-                // NTP sync handled by WiFiHandler
-            }
-
-            // Generate code only if time is synced
-            now = time(nullptr);
+            
+            // Calculate TOTP period from Unix time (30-second intervals from epoch)
+            // This ensures code changes at the CORRECT time, not based on millis()
+            uint8_t currentPeriod = (now >= 0) ? (now / 30) : 0;
+            
+            // Check if we have valid time from RTC
             if (now < 1000000000) {
                 u8g2.clearBuffer();
                 u8g2.setFont(u8g2_font_6x10_tf);
                 u8g2.setDrawColor(1);
-                u8g2.drawStr(10, 32, "Syncing time...");
+
+                u8g2.drawStr(0, 10, "No valid time!");
+                u8g2.drawStr(0, 25, "Connect WiFi once");
+                u8g2.drawStr(0, 40, "to sync RTC");
+                u8g2.drawStr(0, 55, "then use offline");
+
                 u8g2.sendBuffer();
                 menuState.needsRedraw = true;
                 return;
             }
 
-            // Update TOTP code if needed
-            if (shouldUpdateTotp()) {
+            // Update TOTP code if period changed (30-second boundary) or first run
+            if (currentPeriod != lastTotpPeriod || lastTotpPeriod == 0) {
+                lastTotpPeriod = currentPeriod;
                 generateTotpCode();
             }
 
@@ -1435,13 +1471,15 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             u8g2.drawStr(66, 38, utcClock);
 
             // Draw countdown progress bar at bottom (126px)
-            unsigned long elapsed = (millis() - lastTotpUpdate) % TOTP_UPDATE_INTERVAL;
-            uint8_t progress = (elapsed * 126) / TOTP_UPDATE_INTERVAL;
+            // TOTP codes change every 30 seconds at epoch boundary
+            uint8_t secondsInPeriod = now % 30;
+            uint8_t secondsLeft = 30 - secondsInPeriod;
+            uint8_t progress = (secondsInPeriod * 126) / 30;
+            
             u8g2.drawFrame(0, 54, 126, 4);
             u8g2.drawBox(0, 54, progress, 4);
 
             // Draw seconds remaining
-            uint8_t secondsLeft = (TOTP_UPDATE_INTERVAL - elapsed) / 1000;
             char timerStr[3];
             snprintf(timerStr, sizeof(timerStr), "%d", secondsLeft);
             u8g2.setFont(u8g2_font_5x8_tr);
@@ -1696,7 +1734,6 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             menuState.needsRedraw = true;
         }
     }
-
     // ============================================
     // MENU STATE FUNCTIONS
     // ============================================
@@ -1764,6 +1801,61 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         }
 
         saveAllSettings();
+        menuState.needsRedraw = true;
+    }
+
+    void cbWifiMode() {
+        // Force switch to STA mode for now
+        wifiModeAP = false;
+        preferences.begin("demi settings", false);
+        preferences.putBool("wifi_mode_ap", wifiModeAP);
+        preferences.end();
+        
+        Serial.print("Menu: WiFi mode changed to ");
+        Serial.println(wifiModeAP ? "AP (Captive Portal)" : "STA (Internet)");
+        
+        beepC5(50);
+        
+        // Restart WiFi handler with new mode
+        if (menuWifiEnabled.boolValue) {
+            // Properly stop everything first
+            stopCaptivePortal();
+            captiveServer.end(); // Force stop the async server
+            delay(500); // Give it time to clean up
+            
+            wifiDisconnect();
+            wifiStopAp();
+            wifiSetMode(WIFI_OFF);
+            delay(200);
+            
+            if (wifiModeAP) {
+                // AP Only mode - disable STA
+                WiFi.mode(WIFI_AP);
+                delay(100);
+                IPAddress local_IP = IPAddress(192, 168, 4, 1);
+                IPAddress gateway = IPAddress(192, 168, 4, 1);
+                IPAddress subnet = IPAddress(255, 255, 255, 0);
+                WiFi.softAPConfig(local_IP, gateway, subnet);
+                WiFi.softAP("Demi-ESP32", nullptr);
+                startCaptivePortal();
+                Serial.println("  Switched to AP-only mode");
+            } else {
+                // STA mode - enable both AP and STA for internet
+                WiFi.mode(WIFI_AP_STA);
+                delay(100);
+                IPAddress local_IP = IPAddress(192, 168, 4, 1);
+                IPAddress gateway = IPAddress(192, 168, 4, 1);
+                IPAddress subnet = IPAddress(255, 255, 255, 0);
+                WiFi.softAPConfig(local_IP, gateway, subnet);
+                WiFi.softAP("Demi-ESP32", nullptr);
+                startCaptivePortal();
+                wifiStartAutoConnectScan();
+                Serial.println("  Switched to STA+AP mode");
+            }
+        }
+        
+        // Refresh menu display
+        menuWifiMode.name = wifiModeAP ? "Mode: AP" : "Mode: STA";
         menuState.needsRedraw = true;
     }
 
@@ -2014,26 +2106,36 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
     void cbMSAuth() {
         Serial.println("Menu: Microsoft action selected");
 
-        // Check if WiFi is connected - required for NTP sync
-        // Use WiFiHandler status
-        if (!wifiIsConnected()) {
-            Serial.println("[TOTP] WiFi not connected - cannot generate valid TOTP codes");
-            Serial.println("[TOTP] Please connect to WiFi first via Wifi menu");
+        // Priority: WiFi on → NTP | WiFi off → RTC
+        time_t now = 0;
+        
+        if (wifiIsConnected()) {
+            // WiFi on: use NTP (via time(nullptr) or wifiGetTime)
+            now = time(nullptr);
+            if (now < 1000000000) {
+                now = wifiGetTime();
+            }
+            Serial.println("[TOTP] Using NTP time (WiFi connected)");
+        } else {
+            // WiFi off: use RTC
+            now = getUnixTime();
+            Serial.println("[TOTP] Using RTC time (WiFi disconnected)");
+        }
+        
+        if (now < 1000000000) {
+            Serial.println("[TOTP] No valid time - RTC not synced or empty");
             beepLowC(100);
             return;
         }
 
         // Show TOTP code display
         if (!hasTotpKey()) {
-            Serial.println("[TOTP] No TOTP secret available - set TOTP_HEX_SECRET first");
+            Serial.println("[TOTP] No TOTP secret available");
             beepLowC(100);
             return;
         }
 
-        // Force NTP sync before showing code
-        Serial.println("[TOTP] Syncing NTP time before generating code...");
-        // syncNtpTime() handled by WiFiHandler
-
+        Serial.println("[TOTP] Time OK - showing TOTP code");
         showTotpCode = true;
         menuState.needsRedraw = true;
         generateTotpCode();  // Generate initial code
@@ -2090,6 +2192,12 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
 
         // Only update code if time is synced
         time_t now = time(nullptr);
+        if (now < 1000000000) {
+            now = wifiGetTime();
+        }
+        if (now < 1000000000) {
+            now = getUnixTime();
+        }
         if (now < 1000000000) {
             return; // Time not synced yet
         }

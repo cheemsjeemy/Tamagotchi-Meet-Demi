@@ -18,6 +18,8 @@ extern bool demiResetReady;
 extern bool aiDebugEnabled;
 extern DemiAI ai;
 void saveAll();
+void fadeInDisplay(uint16_t durationMs);  // Add this line
+
 
 typedef void (*CommandFunction)(); 
 
@@ -173,6 +175,10 @@ const Command commandTable[] = {
         aiDebugEnabled = !aiDebugEnabled;
         Serial.printf("AI Debug logging: %s\n", aiDebugEnabled ? "ON" : "OFF");
     }},
+    {"TestFade", "tf", "Run display fade test", [](){
+        Serial.println("Running display fade test...");
+        fadeInDisplay(2000);  // 2 second fade-in for testing
+    }}
 };
 
 const int cmdCount = sizeof(commandTable) / sizeof(Command);

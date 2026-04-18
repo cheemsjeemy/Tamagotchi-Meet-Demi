@@ -220,7 +220,8 @@ extern Preferences preferences;
 
 #define MAX_SAVED_NETWORKS 5
 
-// External declarations for WiFi scan (defined in WiFiHandler.cpp)
+// Payload menu items
+extern MenuItem menuOscilloscope;
 extern WifiScanResult scanResults[MAX_WIFI_SCAN_RESULTS];
 extern WifiScanResult savedNetworks[MAX_SAVED_NETWORKS];
 extern int numScanResults;
@@ -312,6 +313,11 @@ bool shouldGoBack();
 // Check if QR code is being displayed
 inline bool isShowingQRCode() {
     return menuState.showQRCode;
+}
+
+inline bool isOscilloscopeActive() {
+    extern volatile bool oscilloscopeActive;
+    return oscilloscopeActive;
 }
 
     // Check if WiFi scanning is in progress

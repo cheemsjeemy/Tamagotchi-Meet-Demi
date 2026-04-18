@@ -452,6 +452,7 @@ void checkNeglect() {
 // Update Demi's stats over time
 void updateStats() {
     static unsigned long lastUpdate = 0;
+    static unsigned long lastSave = 0;
     unsigned long currentTime = millis();
 
     if (currentTime - lastUpdate >= STAT_UPDATE_INTERVAL_MS) { // Update every N seconds
@@ -464,6 +465,12 @@ void updateStats() {
             if (energy >= 100) {
                 isSleeping = false;
                 Serial.println("[Demi] Woke up from sleep!");
+            }
+            // Auto-save every 5 stat updates during sleep (~100 seconds)
+            if (currentTime - lastSave >= 100000) {
+                saveAll();
+                lastSave = currentTime;
+                Serial.println("[Auto-Save] Stats saved (sleep mode)");
             }
             return;
         }
@@ -505,20 +512,23 @@ void updateStats() {
         // Hunger drops faster when clean (demi notices hunger more)
         //if (cleanliness > 70) hungerDrop += 1;
         
-        // Apply drains based on tick counter (differential timing)
-        // Hunger: every tick (N seconds based on STAT_UPDATE_INTERVAL_MS)
-        hunger = constrain(hunger - hungerDrop, 0, 100);
+        // Apply drains based on tick counter with offsets (differential timing)
+// All stats now drop at similar rates (~12-hour cycle)
+        // Hunger: every N ticks + offset
+        if ((tickCounter + HUNGER_DROP_OFFSET) % HUNGER_DROP_INTERVAL == 0) {
+            hunger = constrain(hunger - hungerDrop, 0, 100);
+        }
         
-        // Energy: every N ticks
-        if (tickCounter % ENERGY_DROP_INTERVAL == 0) {
+        // Energy: every N ticks + offset
+        if ((tickCounter + ENERGY_DROP_OFFSET) % ENERGY_DROP_INTERVAL == 0) {
             energy = constrain(energy - energyDrop, 0, 100);
         }
-        if (tickCounter % HAPPINESS_DROP_INTERVAL == 0) {
+        if ((tickCounter + HAPPINESS_DROP_OFFSET) % HAPPINESS_DROP_INTERVAL == 0) {
             happiness = constrain(happiness - happinessDrop, 0, 100);
         }
         
-        // Cleanliness: every N ticks
-        if (tickCounter % CLEANLINESS_DROP_INTERVAL == 0) {
+        // Cleanliness: every N ticks + offset
+        if ((tickCounter + CLEANLINESS_DROP_OFFSET) % CLEANLINESS_DROP_INTERVAL == 0) {
             cleanliness = constrain(cleanliness - cleanlinessDrop, 0, 100);
         }
 
@@ -558,6 +568,13 @@ void updateStats() {
 
         // Check for neglect
         checkNeglect();
+
+        // Auto-save every 5 stat updates (~100 seconds) to persist stats before power loss
+        if (currentTime - lastSave >= 100000) {
+            saveAll();
+            lastSave = currentTime;
+            Serial.println("[Auto-Save] Stats saved");
+        }
 
         // Occasional humor (3% chance)
         if (random(100) < 3) {

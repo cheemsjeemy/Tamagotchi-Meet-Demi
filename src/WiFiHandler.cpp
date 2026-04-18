@@ -1,6 +1,11 @@
 #include "WiFiHandler.h"
 #include <Preferences.h>
 #include <time.h>
+#include "captive_portal.h"
+
+bool captivePortalRoutesRegistered = false;
+bool captivePortalRunning = false;
+DNSServer dnsServer;
 
 static const long GMT_OFFSET_SEC = 28800;
 static const int DAYLIGHT_OFFSET_SEC = 0;
@@ -220,6 +225,9 @@ static void handleNtpSync() {
             wifiStatus.ntpSynced = true;
             ntpSyncInProgress = false;
             Serial.println("[WiFiHandler] NTP synced");
+            
+            extern void syncRTCFromUnixTime(time_t);
+            syncRTCFromUnixTime(now);
         } else if (millis() - lastNtpAttempt > NTP_SYNC_TIMEOUT_MS) {
             ntpSyncInProgress = false;
             Serial.println("[WiFiHandler] NTP sync timeout");
@@ -541,16 +549,35 @@ void initWifiHandler() {
     Preferences prefs;
     prefs.begin(PREF_NAMESPACE, true);
     bool wifiEnabled = prefs.getBool("wifi_enabled", false);
+    bool wifiModeAP = prefs.getBool("wifi_mode_ap", false); // false = STA, true = AP only
     prefs.end();
 
+    Serial.printf("[WiFiHandler] Mode: %s\n", wifiModeAP ? "AP Only" : "STA + AP");
+
     if (wifiEnabled) {
-        WiFi.mode(WIFI_AP_STA);
+        // If wifiModeAP is true, use pure AP mode. Otherwise use AP+STA for internet access
+        if (wifiModeAP) {
+            WiFi.mode(WIFI_AP); // Pure AP for captive portal
+        } else {
+            WiFi.mode(WIFI_AP_STA); // Both AP and STA
+        }
         delay(100);
-        WiFi.softAP("Demi-ESP32", "demiesp32");
+
+        // Explicitly configure SoftAP IP to ensure DHCP/DNS consistency
+        IPAddress local_IP = IPAddress(192, 168, 4, 1);
+        IPAddress gateway = IPAddress(192, 168, 4, 1);
+        IPAddress subnet = IPAddress(255, 255, 255, 0);
+        WiFi.softAPConfig(local_IP, gateway, subnet);
+
+        WiFi.softAP("Demi-ESP32", nullptr);  // Open network - no password
         wifiStatus.state = WIFI_STATE_AP_MODE;
         updateStatusString("AP Mode");
-        actualStartScan(true);
         startCaptivePortal();
+        
+        // Only start auto-connect scan if in STA mode (not AP-only mode)
+        if (!wifiModeAP) {
+            actualStartScan(true); // Auto-connect scan
+        }
     }
 
     Serial.println("[WiFiHandler] Initialization complete");
@@ -634,7 +661,11 @@ bool wifiIsNtpSynced() {
 }
 
 time_t wifiGetTime() {
-    return wifiStatus.ntpSynced ? wifiStatus.lastSyncTime : 0;
+    if (wifiStatus.ntpSynced && wifiStatus.lastSyncTime > 0) {
+        unsigned long elapsed = (millis() - wifiStatus.lastSyncTime) / 1000;
+        return wifiStatus.lastSyncTime + elapsed;
+    }
+    return 0;
 }
 
 bool wifiShouldSyncNtp() {
@@ -659,7 +690,7 @@ bool wifiStartAp() {
         WiFi.mode(WIFI_AP_STA);
         delay(100);
     }
-    return WiFi.softAP("Demi-ESP32", "demiesp32");
+    return WiFi.softAP("Demi-ESP32", nullptr);  // Open network - no password
 }
 
 void wifiStopAp() {
@@ -674,6 +705,18 @@ String wifiGetCurrentSSID() {
 
 IPAddress wifiGetLocalIP() {
     return WiFi.localIP();
+}
+
+void processCaptivePortalDNS() {
+    if (captivePortalRunning) {
+        dnsServer.processNextRequest();
+        // Debug: periodically log DNS activity
+        static unsigned long lastDnsLog = 0;
+        if (millis() - lastDnsLog > 10000) {
+            // Just a heartbeat to show DNS is running
+            lastDnsLog = millis();
+        }
+    }
 }
 
 void wifiHandlerTask(void* param) {
@@ -695,6 +738,20 @@ void wifiHandlerTask(void* param) {
 
         handleConnectionStatus();
         handleNtpSync();
+
+        // Process Captive Portal DNS requests on the same core as WiFi
+        extern void processCaptivePortalDNS();
+        processCaptivePortalDNS();
+
+        // Periodically log connected stations for diagnostic purposes
+        static unsigned long lastStationLog = 0;
+        if (millis() - lastStationLog > 5000) {
+            int count = WiFi.softAPgetStationNum();
+            if (count > 0) {
+                Serial.printf("[WiFiHandler] Connected stations: %d\n", count);
+            }
+            lastStationLog = millis();
+        }
 
         vTaskDelay(pdMS_TO_TICKS(20));
     }
