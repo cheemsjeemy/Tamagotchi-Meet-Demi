@@ -3,6 +3,29 @@
 Demi is a cat. Demi is a he. Demi is a companion travel-gotchi that always got your back and here to make you smile even if your world is upside down.
 ---
 
+
+## **Pinout**
+### **Board:** 4D Systems ESP32-S3 Gen4 R8N16 (16MB Flash, 8MB PSRAM)
+
+| Component | GPIO Pin | Notes |
+|---|---|---|
+| **Display I2C SDA** | 8 | SH1106 OLED |
+| **Display I2C SCL** | 9 | SH1106 OLED |
+| **Display Power** | 1 | NPN transistor control (HIGH = ON) |
+| **Buttons (UP)** | 10 | INPUT_PULLUP |
+| **Buttons (DOWN)** | 6 | INPUT_PULLUP |
+| **Buttons (LEFT)** | 11 | INPUT_PULLUP |
+| **Buttons (RIGHT)** | 5 | INPUT_PULLUP |
+| **Buttons (CENTER)** | 7 | INPUT_PULLUP |
+| **Buttons (LB)** | 12 | Left Bumper, INPUT_PULLUP |
+| **Buttons (RB)** | 4 | Right Bumper, INPUT_PULLUP |
+| **Buzzer** | 40 | PWM via LEDC channel 0 |
+| **Status RGB LED** | 48 | Onboard WS2812 (NeoPixel) |
+| **Oscilloscope** | 13 | Payload function, when active |
+
+All other pins remain unused and available for future expansion.
+
+
 ## Features (For now... C: )
 
 ### 1. **Menu System**
@@ -72,3 +95,5 @@ The project is written in C++ and utilizes the following libraries:
 The menu system is implemented using a tree-like structure, where each menu item is linked to its parent, siblings, and children. This allows for dynamic navigation and interaction.
 
 ---
+
+
