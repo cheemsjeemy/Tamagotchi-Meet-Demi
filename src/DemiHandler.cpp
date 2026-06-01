@@ -2,12 +2,13 @@
 #include "demi_mood_enums.h"
 #include <Arduino.h>
 #include <U8g2lib.h>
-#include "sprite_idle.h"
-#include "sprite_alert.h"
+#include "Demi/Animations/sprite_idle.h"
+#include "Demi/Animations/sprite_alert.h"
+#include "Demi/Animations/sprite_sleep.h"
 #include "menu.h"
 #include "sprite_Demi_Cosmetics.h"
-
-
+#include "RTCHandler.h"
+#include "Payloads/Timezones.h"
 // Define RGB LED pin
 #define RGB_LED_PIN 48
 
@@ -20,6 +21,26 @@ int cleanliness = 100;
 
 // Sleep state
 bool isSleeping = false;
+bool rtcTimeAvailable = false;
+time_t lastSaveTime = 0;
+time_t lastPluggedIn = 0;
+time_t sleepStartTime = 0;
+int startEnergy = 0;
+int sleepDebtHealth = 0;
+
+//TimeZone
+extern const TimezoneInfo timezones[];  // Defined in Timezones.cpp
+extern const int NUM_TZ;
+extern String LocalTimeZone;
+
+int getLocalTimezoneOffset() {
+    for (int i = 0; i < NUM_TZ; i++) {
+       if (String(timezones[i].countryCode) == LocalTimeZone) {
+              return timezones[i].offsetMinutes;
+       }
+    }
+    return 480; // Default to UTC+8 (PH) if not found
+}
 
 // AI state
 DemiAI ai = {};
@@ -32,6 +53,7 @@ DemiMoodModel moodModel;  // Global - init at static init time (before Serial re
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/micro/micro_error_reporter.h"
+
 
 // Global tensor arena
 static uint8_t tensorArena[16 * 1024];
@@ -291,6 +313,7 @@ int currentFrame = 0;
 // Number of frames per animation
 const int IDLE_FRAMES = 2;
 const int ALERT_FRAMES = 3;
+const int SLEEP_FRAMES = 2;
 
 // Mood string array
 const char* moodStrings[] = {
@@ -310,7 +333,9 @@ const char* moodStrings[] = {
 
 // Function to get current sprite frame based on animation state
 const unsigned char* getCurrentSprite() {
-    if (animState == ANIM_IDLE) {
+    if (isSleeping) {
+        return sleep_frames[currentFrame % SLEEP_FRAMES];
+    } else if (animState == ANIM_IDLE) {
         return (currentFrame == 0) ? IDLE_1 : IDLE_2;
     } else {
         return (currentFrame == 0) ? ALERT_1 : (currentFrame == 1) ? ALERT_2 : ALERT_3;
@@ -319,11 +344,13 @@ const unsigned char* getCurrentSprite() {
 
 // Function to get frame count for current animation
 int getFrameCount() {
+    if (isSleeping) return SLEEP_FRAMES;
     return (animState == ANIM_IDLE) ? IDLE_FRAMES : ALERT_FRAMES;
 }
 
 // Function to get frame delay for current animation
 int getFrameDelay() {
+    if (isSleeping) return 1000; // Slower animation for sleep
     return (animState == ANIM_IDLE) ? IDLE_FRAME_DELAY : ALERT_FRAME_DELAY;
 }
 
@@ -334,7 +361,7 @@ void setState(SystemState newState) {
 
         // Update LED color based on system state
         if (newState == STATE_IDLE) {
-            animState = ANIM_IDLE;
+            if (!isSleeping) animState = ANIM_IDLE;
             neopixelWrite(RGB_LED_PIN, 0, 50, 0); // Green for idle
         } else if (newState == STATE_MENU) {
             neopixelWrite(RGB_LED_PIN, 0, 25, 50); // Cyan for menu
@@ -454,18 +481,90 @@ void updateStats() {
     static unsigned long lastUpdate = 0;
     static unsigned long lastSave = 0;
     unsigned long currentTime = millis();
-
+    
     if (currentTime - lastUpdate >= STAT_UPDATE_INTERVAL_MS) { // Update every N seconds
         lastUpdate = currentTime;
-
-        // Sleep mode: energy restores, hunger stays (or drops SLOWER), skip other drains
-        if (isSleeping) {
-            energy = min(100, energy + 2);  // Energy restores fast
-            // Hunger stays same (metabolism slows, doesn't eat) - no gain no loss
-            if (energy >= 100) {
-                isSleeping = false;
-                Serial.println("[Demi] Woke up from sleep!");
+        
+        // Auto-sleep triggers (only if not already sleeping)
+        if (!isSleeping) {
+            // Energy <=20%
+            if (energy <= 20) {
+                isSleeping = true;
+                sleepStartTime = getUnixTime();
+                startEnergy = energy;
+                Serial.println("[Demi] Auto-sleep: energy low");
             }
+            // RTC valid and local time >= 21:00 (9 PM)
+            if (rtcTimeAvailable) {
+                time_t now = getUnixTime();
+                struct tm *timeinfo = gmtime(&now);
+                
+                // Find offset from timezones table using LocalTimeZone
+                int offsetHours = 8; // fallback default (PH = UTC+8)
+                for (int i = 0; i < NUM_TZ; i++) {
+                    if (String(timezones[i].countryCode) == LocalTimeZone) {
+                        offsetHours = timezones[i].offsetMinutes / 60;
+                        break;
+                    }
+                }
+                
+                int localHour = (timeinfo->tm_hour + offsetHours) % 24;
+                
+                if (localHour >= 21) {  // 9 PM local time
+                    isSleeping = true;
+                    sleepStartTime = getUnixTime();
+                    startEnergy = energy;
+                    Serial.println("[Demi] Auto-sleep: nighttime");
+                }
+            }
+        }
+        
+        // Sleep mode: energy restores based on time slept
+        if (isSleeping) {
+            // Calculate target energy based on time slept (formula-based)
+            time_t now = getUnixTime();
+            float sleepHours = difftime(now, sleepStartTime) / 3600.0;
+            float target = startEnergy + (sleepHours / 9.0) * (100 - startEnergy);
+            energy = min(100, (int)target);
+            
+            // Check for auto-wake at 6-8 AM (regardless of energy!)
+            bool autoWake = false;
+            if (rtcTimeAvailable) {
+                now = getUnixTime(); // refresh
+                struct tm *timeinfo = gmtime(&now);
+                
+                // Find offset from timezones table using LocalTimeZone
+                int offsetHours = 8; // fallback default (PH = UTC+8)
+                for (int i = 0; i < NUM_TZ; i++) {
+                    if (String(timezones[i].countryCode) == LocalTimeZone) {
+                        offsetHours = timezones[i].offsetMinutes / 60;
+                        break;
+                    }
+                }
+                
+                int localHour = (timeinfo->tm_hour + offsetHours) % 24;
+                
+                if (localHour >= 6 && localHour <= 8) {
+                    autoWake = true;
+                }
+            }
+            
+            if (autoWake) {
+                // Auto-wake: calculate total sleep time
+                float totalSleepHours = difftime(now, sleepStartTime) / 3600.0;
+                
+                // If slept >=5 hours, recover health debt
+                if (totalSleepHours >= 5.0) {
+                    health = 100;
+                    sleepDebtHealth = 0;
+                    Serial.println("[Demi] Auto-wake: morning, health recovered!");
+                } else {
+                    Serial.println("[Demi] Auto-wake: morning (sleep debt remains)");
+                }
+                
+                isSleeping = false;
+            }
+            
             // Auto-save every 5 stat updates during sleep (~100 seconds)
             if (currentTime - lastSave >= 100000) {
                 saveAll();
@@ -474,114 +573,90 @@ void updateStats() {
             }
             return;
         }
-
-        // Deplete stats with ratios & differential timing
+        
+        // Awake stat depletion (only if NOT sleeping)
         static int tickCounter = 0;
         tickCounter++;
-        
+         
         // Base drain: slow for happiness, normal for others
         int hungerDrop = HUNGER_DROP_AMOUNT;
-        int happinessDrop = HAPPINESS_DROP_AMOUNT;  // Drains every 4 ticks (20 sec) - slow baseline
+        int happinessDrop = HAPPINESS_DROP_AMOUNT;
         int energyDrop = ENERGY_DROP_AMOUNT;
         int cleanlinessDrop = CLEANLINESS_DROP_AMOUNT;
-        
+         
         // ✅ HAPPINESS DIRECTLY AFFECTED BY HUNGER AND ENERGY
-        // Mood triggers at 20-30 range
         int happinessBonusDrain = 0;
-        
-        // Low hunger starts affecting happiness at 30, gets worse at 20
         if (hunger < 30) happinessBonusDrain += 1;
         if (hunger < 20) happinessBonusDrain += 2;
-        
-        // Low energy starts affecting happiness at 30, gets worse at 20
         if (energy < 30) happinessBonusDrain += 1;
         if (energy < 20) happinessBonusDrain += 2;
-        
-        // CRITICAL: When BOTH hunger and energy are in the 20-30 danger zone
         if (hunger < 30 && energy < 30) {
             happinessBonusDrain += 3;
         }
-        
         if (cleanliness < 30) happinessDrop += 1;
-        
         happinessDrop += happinessBonusDrain;
-        
-        // Energy drops faster when very happy (excited burns energy!)
         if (happiness > 70) energyDrop += 1;
-        
-        // Hunger drops faster when clean (demi notices hunger more)
-        //if (cleanliness > 70) hungerDrop += 1;
-        
-        // Apply drains based on tick counter with offsets (differential timing)
-// All stats now drop at similar rates (~12-hour cycle)
-        // Hunger: every N ticks + offset
+         
+        // Apply drains based on tick counter with offsets
         if ((tickCounter + HUNGER_DROP_OFFSET) % HUNGER_DROP_INTERVAL == 0) {
             hunger = constrain(hunger - hungerDrop, 0, 100);
+            Serial.printf("[Stat] Hunger -%d (now %d)\n", hungerDrop, hunger);
         }
-        
-        // Energy: every N ticks + offset
         if ((tickCounter + ENERGY_DROP_OFFSET) % ENERGY_DROP_INTERVAL == 0) {
             energy = constrain(energy - energyDrop, 0, 100);
+            Serial.printf("[Stat] Energy -%d (now %d)\n", energyDrop, energy);
         }
         if ((tickCounter + HAPPINESS_DROP_OFFSET) % HAPPINESS_DROP_INTERVAL == 0) {
             happiness = constrain(happiness - happinessDrop, 0, 100);
+            Serial.printf("[Stat] Happiness -%d (now %d)\n", happinessDrop, happiness);
         }
-        
-        // Cleanliness: every N ticks + offset
         if ((tickCounter + CLEANLINESS_DROP_OFFSET) % CLEANLINESS_DROP_INTERVAL == 0) {
             cleanliness = constrain(cleanliness - cleanlinessDrop, 0, 100);
+            Serial.printf("[Stat] Cleanliness -%d (now %d)\n", cleanlinessDrop, cleanliness);
         }
-
-        // ✅ HEALTH ONLY DROPS WHEN SURVIVAL STATS ARE CRITICAL
-        // Health is stable until things get really bad
         
+        // ✅ HEALTH ONLY DROPS WHEN SURVIVAL STATS ARE CRITICAL
         if (hunger < 15 || energy < 15 || cleanliness < 15) {
-            // Only start damaging health when any survival stat is <15%
             int damage = 0;
-            if (hunger < 15)    damage += HEALTH_DROP_AMOUNT;
-            if (energy < 15)    damage += HEALTH_DROP_AMOUNT * 2;
+            if (hunger < 15) damage += HEALTH_DROP_AMOUNT;
+            if (energy < 15) damage += HEALTH_DROP_AMOUNT * 2;
             if (cleanliness < 15) damage += HEALTH_DROP_AMOUNT;
-            
             health = constrain(health - damage, 0, 100);
-        }
-        else if (hunger > 50 && energy > 50 && cleanliness > 50) {
-            // Health is STABLE between 15% and 50% - no drain
-            // Health RECOVERS slowly when all >50%
+            Serial.printf("[Stat] Health -%d (now %d)\n", damage, health);
+        } else if (hunger > 50 && energy > 50 && cleanliness > 50) {
             if (tickCounter % 32 == 0) {
                 health = min(100, health + 1);
             }
         }
         
-        // Full fast recovery only when everything is good
         if (hunger > 70 && energy > 70 && cleanliness > 70 && happiness > 70) {
             if (tickCounter % 16 == 0) {
                 health = min(100, health + 2);
             }
         }
         
-        // Health slowly recovers when all stats are good (every 16 ticks = 80 sec)
         if (hunger > 60 && energy > 60 && cleanliness > 60 && happiness > 60) {
             if (tickCounter % 16 == 0) {
-                health = min(100, health + 2);  // Slow recovery
+                health = min(100, health + 2);
             }
         }
-
-        // Check for neglect
+        
         checkNeglect();
-
-        // Auto-save every 5 stat updates (~100 seconds) to persist stats before power loss
+        
+        // Auto-save every 5 stat updates (~100 seconds)
         if (currentTime - lastSave >= 100000) {
             saveAll();
             lastSave = currentTime;
             Serial.println("[Auto-Save] Stats saved");
         }
-
+        
         // Occasional humor (3% chance)
         if (random(100) < 3) {
             Serial.println("[Demi] *contemplating existence*");
         }
-    }
 }
+}
+
 
 // Save all stats and AI state to NVS
 void saveAll() {
@@ -599,6 +674,9 @@ void saveAll() {
     prefs.putInt("pers", ai.personality);
     prefs.putInt("attn", ai.attentionScore);
     prefs.putInt("rout", ai.routineScore);
+    // Save timestamp
+    lastSaveTime = getUnixTime();
+    prefs.putLong64("lastSave", lastSaveTime);
     prefs.end();
 }
 
@@ -618,7 +696,54 @@ void loadAll() {
     ai.personality = (PersonalityType)prefs.getInt("pers", 0);
     ai.attentionScore = prefs.getInt("attn", 0);
     ai.routineScore = prefs.getInt("rout", 0);
+    lastSaveTime = prefs.getLong64("lastSave", 0);
     prefs.end();
+    
+    // Save stats before simulation
+    int oldHunger = hunger;
+    int oldHappiness = happiness;
+    int oldEnergy = energy;
+    int oldCleanliness = cleanliness;
+    int oldHealth = health;
+    
+    // Set last plugged in time
+    lastPluggedIn = getUnixTime();
+    
+    // Simulate stat drops if time passed
+    if (lastSaveTime > 0 && rtcTimeAvailable) {
+        time_t currentTime = getUnixTime();
+        if (currentTime > lastSaveTime) {
+            time_t timePassed = currentTime - lastSaveTime;
+            if (timePassed > 0 && timePassed < 2592000) { // max 30 days in seconds
+                float hoursPassed = timePassed / 3600.0;
+                // Approximate drop rates (per hour)
+                float hungerPerHour = (HUNGER_DROP_AMOUNT * 3600.0) / (HUNGER_DROP_INTERVAL * 20.0);
+                float energyPerHour = (ENERGY_DROP_AMOUNT * 3600.0) / (ENERGY_DROP_INTERVAL * 20.0);
+                float happinessPerHour = (HAPPINESS_DROP_AMOUNT * 3600.0) / (HAPPINESS_DROP_INTERVAL * 20.0);
+                float cleanlinessPerHour = (CLEANLINESS_DROP_AMOUNT * 3600.0) / (CLEANLINESS_DROP_INTERVAL * 20.0);
+                
+                hunger = max(0, hunger - (int)(hoursPassed * hungerPerHour));
+                energy = max(0, energy - (int)(hoursPassed * energyPerHour));
+                happiness = max(0, happiness - (int)(hoursPassed * happinessPerHour));
+                cleanliness = max(0, cleanliness - (int)(hoursPassed * cleanlinessPerHour));
+                
+                // Health drops only if survival stats are critical
+                if (hunger < 15 || energy < 15) {
+                    int healthDrop = 0;
+                    if (hunger < 15) healthDrop += HEALTH_DROP_AMOUNT;
+                    if (energy < 15) healthDrop += HEALTH_DROP_AMOUNT * 2;
+                    health = max(0, health - healthDrop);
+                }
+                
+                Serial.printf("[Load] Simulated %.1f hours offline\n", hoursPassed);
+                Serial.printf("[Load] Stats change: Hngr %d->%d (-%d), ", oldHunger, hunger, oldHunger-hunger);
+                Serial.printf("Ener %d->%d (-%d), ", oldEnergy, energy, oldEnergy-energy);
+                Serial.printf("Happ %d->%d (-%d), ", oldHappiness, happiness, oldHappiness-happiness);
+                Serial.printf("Clen %d->%d (-%d), ", oldCleanliness, cleanliness, oldCleanliness-cleanliness);
+                Serial.printf("Heal %d->%d (-%d)\n", oldHealth, health, oldHealth-health);
+            }
+        }
+    }
     
     // Initialize TinyML mood model
     if (!moodModel.isReady()) {
@@ -669,9 +794,14 @@ void drawSpriteWithStats(U8G2_SH1106_128X64_NONAME_F_HW_I2C& u8g2, const unsigne
     u8g2.print(cleanliness);
 
     // BOTTOM: Mood display
-    DemiMood mood = getDemiMood();
-    u8g2.setCursor(0, 60);
-    u8g2.print(getMoodString(mood));
+    if (isSleeping) {
+        u8g2.setCursor(0, 60);
+        u8g2.print("SLEEPING");
+    } else {
+        DemiMood mood = getDemiMood();
+        u8g2.setCursor(0, 60);
+        u8g2.print(getMoodString(mood));
+    }
     
     // Show AI status indicator
     if (moodModel.isReady()) {

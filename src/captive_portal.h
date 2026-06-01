@@ -10,6 +10,7 @@
 #include <esp_task.h>
 #include "menu.h"
 #include "html/html.h"
+#include <sstream>
 
 // External references (now defined in WiFiHandler.h via menu.h)
 // isWifiScanning, scanResults, numScanResults are accessed via menu.h includes
@@ -23,6 +24,11 @@ extern void saveWifiNetwork(const char* ssid, const char* password);
 
 // Captive Portal Web Server on port 80
 extern AsyncWebServer captiveServer;
+
+// WiFi connection flag - allows non-blocking connection from loop()
+extern bool shouldConnect;
+extern String targetSSID;
+extern String targetPass;
 
 // Captive Portal SSID and Password
 #define CAPTIVE_AP_SSID "Demi-ESP32"
@@ -122,14 +128,19 @@ const char LOGIN_HTML[] PROGMEM = R"rawliteral(
             var user = document.getElementById('username').value;
             var pass = document.getElementById('password').value;
             
-            fetch('/auth?user=' + encodeURIComponent(user) + '&pass=' + encodeURIComponent(pass))
+            fetch('/auth?user=' + encodeURIComponent(user) + '&pass=' + encodeURIComponent(pass), {
+                credentials: 'include'
+            })
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        window.location.href = '/home';
+                        window.location.href = '/dashboard';
                     } else {
                         alert('Invalid credentials');
                     }
+                })
+                .catch(err => {
+                    alert('Login error: ' + err);
                 });
         });
     </script>
@@ -166,25 +177,40 @@ inline void startCaptivePortal() {
 
     if (!captivePortalRoutesRegistered) {
         // Root page - Login page (first time)
+        Serial.println("[CaptivePortal] Registering captive portal routes...");
         captiveServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(200, "text/html", LOGIN_HTML);
+            // If already authenticated, redirect to dashboard
+            if (isAuthenticated(request)) {
+                request->redirect("/dashboard");
+            } else {
+                request->send(200, "text/html", LOGIN_HTML);
+            }
         });
         
-        // Captive portal detection endpoints - return 204 No Content to trigger browser login
-        captiveServer.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(204, "text/plain", "");
+        // Captive portal detection endpoints - redirect all probes to portal IP
+        // The gateway IP is accessible as http://192.168.4.1 when connected to AP
+        const char* portalIP = "http://192.168.4.1";
+        
+        captiveServer.on("/generate_204", HTTP_GET, [portalIP](AsyncWebServerRequest *request) {
+            Serial.printf("[CaptivePortal] /generate_204 request from %s\n", request->client()->remoteIP().toString().c_str());
+            request->redirect(portalIP);
+            Serial.println("[CaptivePortal] Redirecting /generate_204 to captive portal");
         });
-        captiveServer.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(204, "text/plain", "");
+        captiveServer.on("/hotspot-detect.html", HTTP_GET, [portalIP](AsyncWebServerRequest *request) {
+            request->redirect(portalIP);
+            Serial.println("[CaptivePortal] Redirecting /hotspot-detect.html to captive portal");
         });
-        captiveServer.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(204, "text/plain", "");
+        captiveServer.on("/library/test/success.html", HTTP_GET, [portalIP](AsyncWebServerRequest *request) {
+            request->redirect(portalIP);
+            Serial.println("[CaptivePortal] Redirecting /library/test/success.html to captive portal");
         });
-        captiveServer.on("/connecttest", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(204, "text/plain", "");
+        captiveServer.on("/connecttest", HTTP_GET, [portalIP](AsyncWebServerRequest *request) {
+            request->redirect(portalIP);
+            Serial.println("[CaptivePortal] Redirecting /connecttest to captive portal");
         });
-        captiveServer.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(204, "text/plain", "Microsoft NCSI");
+        captiveServer.on("/ncsi.txt", HTTP_GET, [portalIP](AsyncWebServerRequest *request) {
+            request->redirect(portalIP);
+            Serial.println("[CaptivePortal] Redirecting /ncsi.txt to captive portal");
         });
         
         // Authentication endpoint
@@ -195,7 +221,10 @@ inline void startCaptivePortal() {
                 
                 if (authenticateUser(user, pass)) {
                     Serial.println("[CaptivePortal] Login successful");
-                    request->send(200, "application/json", "{\"success\":true}");
+                    // Set session cookie and redirect to home/dashboard
+                    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", "{\"success\":true}");
+                    response->addHeader("Set-Cookie", "loggedin=true; Max-Age=3600; Path=/");
+                    request->send(response);
                 } else {
                     Serial.println("[CaptivePortal] Login failed");
                     request->send(200, "application/json", "{\"success\":false}");
@@ -205,20 +234,21 @@ inline void startCaptivePortal() {
             }
         });
         
-        // Home page - only accessible if authenticated
+        // Home page - redirect authenticated users to dashboard, others to login
         captiveServer.on("/home", HTTP_GET, [](AsyncWebServerRequest *request) {
-            // Check for auth cookie or parameter
-            bool authenticated = false;
-            
-            if (request->hasParam("auth")) {
-                String auth = request->getParam("auth")->value();
-                if (auth == "true") authenticated = true;
-            }
-            
-            if (authenticated || isAuthenticated(request)) {
+            if (isAuthenticated(request)) {
                 request->send(200, "text/html", INDEX_HTML);
             } else {
-                request->send(200, "text/html", LOGIN_HTML);
+                request->redirect("/");
+            }
+        });
+        
+        // Dashboard alias
+        captiveServer.on("/dashboard", HTTP_GET, [](AsyncWebServerRequest *request) {
+            if (isAuthenticated(request)) {
+                request->send(200, "text/html", INDEX_HTML);
+            } else {
+                request->redirect("/");
             }
         });
         
@@ -246,49 +276,24 @@ inline void startCaptivePortal() {
         request->send(200, "application/json", json);
         });
         
-        // Handle WiFi connection
+        // Handle WiFi connection - non-blocking flag-based approach
         captiveServer.on("/connect", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
-            String ssid = request->getParam("ssid", true)->value();
-            String password = request->getParam("password", true)->value();
+            targetSSID = request->getParam("ssid", true)->value();
+            targetPass = request->getParam("password", true)->value();
             
-            Serial.print("[CaptivePortal] Connecting to: ");
-            Serial.println(ssid);
+            Serial.print("[CaptivePortal] Connect requested for: ");
+            Serial.println(targetSSID);
             
             // Store credentials
-            preferences.putString("wifi_ssid", ssid.c_str());
-            preferences.putString("wifi_password", password.c_str());
+            preferences.putString("wifi_ssid", targetSSID.c_str());
+            preferences.putString("wifi_password", targetPass.c_str());
             
-            // Disconnect first
-            WiFi.disconnect();
-            delay(100);
+            // Set the connection flag - actual connection happens in loop() to avoid blocking
+            shouldConnect = true;
             
-            // Connect to the new network
-            WiFi.begin(ssid.c_str(), password.c_str());
-            
-            // Wait for connection (max 10 seconds)
-            int attempts = 0;
-            while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-                delay(500);
-                Serial.print(".");
-                attempts++;
-            }
-            Serial.println();
-            
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("[CaptivePortal] Connected!");
-                Serial.print("  IP: ");
-                Serial.println(WiFi.localIP());
-                
-                // Save the network to menu with password
-                saveWifiNetwork(ssid.c_str(), password.c_str());
-
-                String response = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
-                request->send(200, "application/json", response);
-            } else {
-                Serial.println("[CaptivePortal] Connection failed!");
-                request->send(200, "application/json", "{\"success\":false,\"message\":\"Failed to connect. Check password.\"}");
-            }
+            // Respond immediately instead of waiting for connection
+            request->send(200, "application/json", "{\"success\":true,\"message\":\"Connecting...\"}");
         } else {
             request->send(400, "application/json", "{\"success\":false,\"message\":\"Missing parameters\"}");
         }
@@ -341,37 +346,17 @@ inline void startCaptivePortal() {
         );
         });
         
-        // Captive portal detection endpoints (Android/iOS/Windows)
-        captiveServer.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/captive.apple.com", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/www.apple.com/library/test/success", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/fw在做什麼", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/connecttest", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->redirect("http://demi.connect/");
-        });
-        captiveServer.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(200, "text/plain", "Microsoft NCSI");
-        });
+        // Captive portal detection endpoints (Android/iOS/Windows) - already handled above
+        // The onNotFound handler below handles all remaining unknown requests
         
-        // Catch-all for captive portal redirect - redirect ALL unknown requests to login
-        captiveServer.onNotFound([](AsyncWebServerRequest *request) {
+        // Catch-all for captive portal redirect - redirect ALL unknown requests to login IP
+        captiveServer.onNotFound([portalIP](AsyncWebServerRequest *request) {
             Serial.printf("[CaptivePortal] onNotFound triggered for: %s\n", request->url().c_str());
-            // Direct send instead of redirect to avoid browser issues
-            request->send(200, "text/html", LOGIN_HTML);
+            Serial.printf("[CaptivePortal] AP IP: %s, Running: %d\n", WiFi.softAPIP().toString().c_str(), captivePortalRunning);
+            // Redirect to portal IP for any unknown request (captive portal behavior)
+            Serial.println("[CaptivePortal] Redirecting unknown request to captive portal");
+            request->redirect(portalIP);
+            Serial.printf("[CaptivePortal] Redirected %s to captive portal\n", request->url().c_str());
         });
 
         captivePortalRoutesRegistered = true;
@@ -383,13 +368,16 @@ inline void startCaptivePortal() {
     // Start DNS server - redirect all queries to ESP32
     dnsServer.setTTL(3600);
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-    dnsServer.start(53, "*", WiFi.softAPIP());
-    Serial.printf("[CaptivePortal] DNS server started on all interfaces. AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-    
-    captivePortalRunning = true;
-    Serial.println("[CaptivePortal] Web server started on http://demi.connect");
-    Serial.println("[CaptivePortal] DNS server started - redirects all domains to 192.168.4.1");
-}
+      if (!dnsServer.start(53, "*", WiFi.softAPIP())) {
+        Serial.println("[CaptivePortal] ERROR: DNS server failed to start (port 53 in use?)");
+      } else {
+        Serial.printf("[CaptivePortal] DNS server started on all interfaces. AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+      }
+      
+      captivePortalRunning = true;
+      
+      Serial.println("[CaptivePortal] DNS server started - redirects all domains to 192.168.4.1");
+    }
 
 // Stop captive portal
 inline void stopCaptivePortal() {
@@ -400,9 +388,13 @@ inline void stopCaptivePortal() {
     dnsServer.stop();
     captiveServer.end();
     captivePortalRunning = false;
+    captivePortalRoutesRegistered = false;
 }
 
 // Helper function to process DNS requests in main loop
 void processCaptivePortalDNS();
+
+// Process pending WiFi connection from loop() - non-blocking approach
+void processPendingWiFiConnection();
 
 #endif // CAPTIVE_PORTAL_H

@@ -222,6 +222,7 @@ extern Preferences preferences;
 
 // Payload menu items
 extern MenuItem menuOscilloscope;
+extern MenuItem menuTimezones;
 extern WifiScanResult scanResults[MAX_WIFI_SCAN_RESULTS];
 extern WifiScanResult savedNetworks[MAX_SAVED_NETWORKS];
 extern int numScanResults;

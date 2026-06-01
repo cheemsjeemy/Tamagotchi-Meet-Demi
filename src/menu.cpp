@@ -13,6 +13,7 @@
 #include <time.h>
 #include "miscellaneous/names.h"
 #include "Payloads/Oscilloscope.h"
+#include "Payloads/Timezones.h"
 
 #include "WiFiHandler.h"
 #include "DemiHandler.h"
@@ -261,6 +262,7 @@ MenuItem menuTotpShowCode   = menuAction("Show Code", cbMSAuth);
 // ============================================
 
 MenuItem menuOscilloscope = menuAction("Oscilloscope", cbOscilloscope);
+MenuItem menuTimezones = menuAction("Timezones", cbTimezones);
 
 // ============================================
 // CONNECTIONS (NEW - from menu_plan.md)
@@ -817,10 +819,13 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
         menuTotpShowCode.nextSibling = nullptr;
         menuTotpShowCode.prevSibling = &menuTotpSetup;
 
-        // Payloads submenu: Oscilloscope
+        // Payloads submenu: Oscilloscope -> Timezones
         menuPayloads.firstChild = &menuOscilloscope;
         menuOscilloscope.parent = &menuPayloads;
-        menuOscilloscope.nextSibling = nullptr;
+        menuOscilloscope.nextSibling = &menuTimezones;
+        menuTimezones.parent = &menuPayloads;
+        menuTimezones.prevSibling = &menuOscilloscope;
+        menuTimezones.nextSibling = nullptr;
     }
 
     // ============================================
@@ -1449,9 +1454,11 @@ MenuItem menuConnectedDevicesList = menuFolder("Connected Devices");
             u8g2.drawStr(33, 28, displayCode);
 
             // Draw PH and UTC time below the code
+            // now is UTC time from RTC/NTP - add 28800 (UTC+8) for local PH time
+            time_t localTimeUnix = now + gmtOffset_sec;
             struct tm localTimeInfo;
             struct tm utcTimeInfo;
-            localtime_r(&now, &localTimeInfo);
+            localtime_r(&localTimeUnix, &localTimeInfo);
             gmtime_r(&now, &utcTimeInfo);
 
             char phClock[16];

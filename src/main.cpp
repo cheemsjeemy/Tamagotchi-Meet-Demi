@@ -5,16 +5,17 @@
 #include <Preferences.h>
 #include "DemiHandler.h"
 #include "menu.h"
-#include "sprite_idle.h"
-#include "sprite_alert.h"
+#include "Demi/Animations/sprite_idle.h"
+#include "Demi/Animations/sprite_alert.h"
+#include "Demi/Animations/sprite_sleep.h"
 #include <esp_task_wdt.h>
 #include "WiFiHandler.h"
 #include "esp_partition.h"
 #include <SPIFFS.h>
 #include "miscellaneous/commands.h"
-#include "DemiHandler.h"
 #include "RTCHandler.h"
 #include "Payloads/Oscilloscope.h"
+#include "Payloads/Timezones.h"
 #include "captive_portal.h"
 
 
@@ -29,9 +30,15 @@ static const int daylightOffset_sec = 0;
 // Forward declaration for tasks
 void mainLoopTask(void* param);
 
+// Forward declarations for I2C watchdog
+void performHardReset();
+bool attemptSoftRecovery();
+void checkI2CHealth();
+
 // Pins as requested
 #define OLED_SDA_PIN 8
 #define OLED_SCL_PIN 9
+#define OLED_PWR_PIN 1  // NPN transistor to control OLED GND
 #define RGB_LED_PIN 48 // Onboard LED for status
 
 // Physical button pins
@@ -164,6 +171,19 @@ bool showResetProgress = false;
 unsigned long demiResetStartTime = 0;
 bool aiDebugEnabled = false;  // Toggle for AI debug logging
 
+// OLED hard reset variables
+bool oledResetTimerStarted = false;
+unsigned long oledResetStartTime = 0;
+
+// I2C Watchdog variables
+bool i2cWatchdogEnabled = true;
+unsigned long lastI2CCheck = 0;
+const unsigned long I2C_CHECK_INTERVAL = 2000;  // Check every 2 seconds
+const int I2C_ERROR_THRESHOLD = 3;              // 3 consecutive failures before reset
+int consecutiveI2CErrors = 0;
+unsigned long lastSuccessfulI2C = 0;
+bool softRecoveryAttempted = false;
+
 // Button handler struct
 struct Button {
     uint8_t pin;
@@ -279,7 +299,117 @@ bool isAnyButtonPressed() {
     return btnState_UP || btnState_DOWN || btnState_CENTER || btnState_LEFT || btnState_RIGHT || btnState_LB || btnState_RB;
 }
 
+// --- I2C WATCHDOG FUNCTIONS ---
+// Hard reset: power cycle the OLED via transistor
+void performHardReset() {
+    Serial.println("[OLED] Performing hard reset...");
+    
+    // 1. Stop I2C communication to prevent "ghost power" leaks
+    pinMode(OLED_SDA_PIN, INPUT);
+    pinMode(OLED_SCL_PIN, INPUT);
+    
+    // 2. Cut the Ground path via the NPN transistor
+    digitalWrite(OLED_PWR_PIN, LOW);
+    
+    // 3. WAIT for large capacitor to drain completely
+    delay(2000);
+    
+    // 4. Restore the Ground path
+    digitalWrite(OLED_PWR_PIN, HIGH);
+    delay(200); // Let voltage stabilize
+    
+    // 5. Re-initialize I2C and the display
+    Wire.setPins(OLED_SDA_PIN, OLED_SCL_PIN);
+    if (!Wire.begin()) {
+        Serial.println("[OLED] Wire.begin() failed!");
+        return;
+    }
+    
+    if (u8g2.begin()) {
+        Serial.println("[OLED] Recovered successfully!");
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_6x10_tf);
+        u8g2.setDrawColor(1);
+        u8g2.setCursor(0, 20);
+        u8g2.print("OLED Recovered!");
+        u8g2.sendBuffer();
+        delay(1500);
+    } else {
+        Serial.println("[OLED] Recovery failed!");
+    }
+}
 
+// Soft recovery: reinitialize I2C and display without power cycling
+bool attemptSoftRecovery() {
+    Serial.println("[I2C Watchdog] Attempting soft recovery...");
+    
+    Wire.end();
+    delay(50);
+    
+    if (!Wire.begin()) {
+        Serial.println("[I2C Watchdog] Wire.begin() failed in soft recovery!");
+        return false;
+    }
+    Wire.setClock(100000);
+    delay(100);
+    
+    if (u8g2.begin()) {
+        Serial.println("[I2C Watchdog] Soft recovery successful!");
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_6x10_tf);
+        u8g2.setDrawColor(1);
+        u8g2.setCursor(0, 20);
+        u8g2.print("I2C Recovered!");
+        u8g2.sendBuffer();
+        delay(1000);
+        return true;
+    } else {
+        Serial.println("[I2C Watchdog] Soft recovery failed - display not responding");
+        return false;
+    }
+}
+
+// Check I2C bus health by probing the OLED
+void checkI2CHealth() {
+    if (!i2cWatchdogEnabled) return;
+    
+    Wire.beginTransmission(0x3C);
+    uint8_t error = Wire.endTransmission();
+    
+    if (error == 0) {
+        consecutiveI2CErrors = 0;
+        lastSuccessfulI2C = millis();
+        softRecoveryAttempted = false;
+        return;
+    }
+    
+    consecutiveI2CErrors++;
+    
+    static unsigned long lastErrorPrint = 0;
+    if (millis() - lastErrorPrint > 1000) {
+        Serial.printf("[I2C Watchdog] Error %d (count: %d/%d)\n", 
+                     error, consecutiveI2CErrors, I2C_ERROR_THRESHOLD);
+        lastErrorPrint = millis();
+    }
+    
+    if (consecutiveI2CErrors >= I2C_ERROR_THRESHOLD) {
+        Serial.printf("[I2C Watchdog] %d consecutive I2C errors - triggering recovery\n", 
+                     consecutiveI2CErrors);
+        
+        if (!softRecoveryAttempted) {
+            softRecoveryAttempted = true;
+            if (attemptSoftRecovery()) {
+                consecutiveI2CErrors = 0;
+                return;
+            }
+        }
+        
+        Serial.println("[I2C Watchdog] Soft recovery failed, performing hard reset...");
+        performHardReset();
+        consecutiveI2CErrors = 0;
+        softRecoveryAttempted = false;
+    }
+}
 
 void handleMenuInput() {
     // Check for exit combo (Center + UP held)
@@ -535,6 +665,11 @@ void setup() {
     // Initialize button pins
     initButtons();
 
+    // Turn on OLED power via NPN transistor
+    pinMode(OLED_PWR_PIN, OUTPUT);
+    digitalWrite(OLED_PWR_PIN, HIGH); // NPN: HIGH = ON
+    delay(500); // Wait for capacitor to charge and OLED to stabilize
+
     // Initialize I2C and display
     Wire.setPins(OLED_SDA_PIN, OLED_SCL_PIN);
    
@@ -544,7 +679,32 @@ void setup() {
         neopixelWrite(RGB_LED_PIN, 50, 0, 0); // Red for error
         while (1);
     }
-    //Wire.setClock(400000); // 400kHz for faster display updates
+    
+    // I2C Bus scan to detect connected devices
+    Serial.println("[I2C] Scanning for devices on SDA=GPIO8, SCL=GPIO9...");
+    byte i2cError = 0;
+    byte nDevices = 0;
+    for (byte address = 1; address < 127; address++) {
+        Wire.beginTransmission(address);
+        i2cError = Wire.endTransmission();
+        if (i2cError == 0) {
+            Serial.printf("  [I2C] Device found at address 0x%02X", address);
+            if (address == 0x3C) {
+                Serial.print(" (SH1106 OLED display)");
+            }
+            Serial.println();
+            nDevices++;
+        } else if (i2cError == 4) {
+            Serial.printf("  [I2C] Unknown error at address 0x%02X\n", address);
+        }
+    }
+    if (nDevices == 0) {
+        Serial.println("  [I2C] No devices found - check wiring!");
+    } else {
+        Serial.printf("[I2C] Scan complete: %d device(s) found\n", nDevices);
+    }
+    
+    Wire.setClock(100000); // Set I2C clock to 100kHz for stability
     if (u8g2.begin()) {
         delay(200);
         u8g2.setContrast(255); // Start at max contrast for fade-in
@@ -678,6 +838,25 @@ void mainLoopTask(void* param) {
                     else if (btn.pin == BTN_RB) Serial.println("BTN: RB");
                 }
             }
+        }
+
+        // Check for OLED hard reset: UP+DOWN+LEFT+RIGHT held for 5 seconds
+        if (btnState_UP && btnState_DOWN && btnState_LEFT && btnState_RIGHT) {
+            if (!oledResetTimerStarted) {
+                oledResetTimerStarted = true;
+                oledResetStartTime = millis();
+            } else if (millis() - oledResetStartTime >= 5000) {
+                performHardReset();
+                oledResetTimerStarted = false;
+            }
+        } else {
+            oledResetTimerStarted = false;
+        }
+
+        // Periodic I2C health check (every 2 seconds)
+        if (millis() - lastI2CCheck >= I2C_CHECK_INTERVAL) {
+            checkI2CHealth();
+            lastI2CCheck = millis();
         }
 
         if (currentState != previousState) {

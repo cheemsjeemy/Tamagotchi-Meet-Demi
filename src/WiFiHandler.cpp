@@ -7,6 +7,11 @@ bool captivePortalRoutesRegistered = false;
 bool captivePortalRunning = false;
 DNSServer dnsServer;
 
+// Non-blocking WiFi connection variables
+bool shouldConnect = false;
+String targetSSID = "";
+String targetPass = "";
+
 static const long GMT_OFFSET_SEC = 28800;
 static const int DAYLIGHT_OFFSET_SEC = 0;
 static const char* PREF_NAMESPACE = "demi settings";
@@ -714,6 +719,8 @@ void processCaptivePortalDNS() {
         static unsigned long lastDnsLog = 0;
         if (millis() - lastDnsLog > 10000) {
             // Just a heartbeat to show DNS is running
+            Serial.printf("[DNS] Server running. AP IP: %s, Stations: %d\n", 
+                WiFi.softAPIP().toString().c_str(), WiFi.softAPgetStationNum());
             lastDnsLog = millis();
         }
     }
@@ -753,6 +760,22 @@ void wifiHandlerTask(void* param) {
             lastStationLog = millis();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
+
+// Process pending WiFi connection from loop() - non-blocking approach
+// This is called repeatedly from the main loop to avoid blocking the web server
+void processPendingWiFiConnection() {
+    if (shouldConnect) {
+        Serial.printf("[WiFi] Connecting to %s...\n", targetSSID.c_str());
+        
+        WiFi.disconnect();
+        delay(100);
+        
+        WiFi.begin(targetSSID.c_str(), targetPass.c_str());
+        
+        shouldConnect = false;
+    }
+}
+

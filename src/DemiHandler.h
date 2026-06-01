@@ -162,6 +162,12 @@ extern int energy;
 extern int health;
 extern int cleanliness;
 extern bool isSleeping;
+extern bool rtcTimeAvailable;
+extern time_t lastSaveTime;
+extern time_t lastPluggedIn;
+extern time_t sleepStartTime;
+extern int startEnergy;
+extern int sleepDebtHealth;
 extern DemiAI ai;
 
 // Layer functions
